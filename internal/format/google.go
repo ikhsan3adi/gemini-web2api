@@ -13,10 +13,22 @@ import (
 type Image struct {
 	Data []byte
 	MIME string
+	URL  string // Remote URL passthrough (when data not yet fetched)
 }
 
 func BuildToolPrompt(defs []models.GoogleFunctionDeclaration) string {
 	specBytes, _ := json.Marshal(defs)
+	// Tool slimming: if tool definitions exceed 30KB, re-marshal with name+description only.
+	if len(specBytes) > 30000 {
+		slimmed := make([]models.GoogleFunctionDeclaration, len(defs))
+		for i, d := range defs {
+			slimmed[i] = models.GoogleFunctionDeclaration{
+				Name:        d.Name,
+				Description: d.Description,
+			}
+		}
+		specBytes, _ = json.Marshal(slimmed)
+	}
 	return fmt.Sprintf(
 		"# Tool Use\n\n"+
 			"You can call the following tools to help accomplish tasks. "+
@@ -116,6 +128,7 @@ func GoogleContentsToPrompt(req models.GoogleGenerateRequest) (string, []Image, 
 				}
 				if dec, err := base64.StdEncoding.DecodeString(p.InlineData.Data); err == nil {
 					images = append(images, Image{Data: dec, MIME: mime})
+					msgParts = append(msgParts, "[Image attached]")
 				}
 			} else if p.FunctionCall != nil {
 				args := p.FunctionCall.Args

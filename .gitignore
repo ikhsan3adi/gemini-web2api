@@ -23,4 +23,7 @@ go.work
 # Compiled binary
 gemini-web2api
 
+# Auth credentials
+gemini-auth.json
+
 .ignore/

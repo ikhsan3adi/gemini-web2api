@@ -33,9 +33,12 @@ func TestMessagesToPrompt(t *testing.T) {
 		ToolChoice: "auto",
 	}
 
-	prompt, err := MessagesToPrompt(req)
+	prompt, images, err := MessagesToPrompt(req)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(images) != 0 {
+		t.Errorf("Expected 0 images, got %d", len(images))
 	}
 
 	if !strings.Contains(prompt, "[System instruction]: Be helpful.") {
@@ -43,6 +46,187 @@ func TestMessagesToPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Hello!") {
 		t.Errorf("Prompt missing user message: %q", prompt)
+	}
+}
+
+func TestDecodeDataURL(t *testing.T) {
+	// Valid data URL
+	b64 := "SGVsbG8="
+	dataURL := "data:text/plain;base64," + b64
+	data, mime, err := DecodeDataURL(dataURL)
+	if err != nil {
+		t.Fatalf("DecodeDataURL: unexpected error: %v", err)
+	}
+	if string(data) != "Hello" {
+		t.Errorf("DecodeDataURL data = %q, want %q", string(data), "Hello")
+	}
+	if mime != "text/plain" {
+		t.Errorf("DecodeDataURL mime = %q, want %q", mime, "text/plain")
+	}
+
+	// Invalid: not a data URL
+	_, _, err = DecodeDataURL("https://example.com/img.png")
+	if err == nil {
+		t.Error("DecodeDataURL should fail for non-data URL")
+	}
+
+	// Invalid: no base64
+	_, _, err = DecodeDataURL("data:text/plain,hello")
+	if err == nil {
+		t.Error("DecodeDataURL should fail for non-base64 data URL")
+	}
+}
+
+func TestImageFromURL(t *testing.T) {
+	img := ImageFromURL("https://example.com/photo.jpg")
+	if img.URL != "https://example.com/photo.jpg" {
+		t.Errorf("ImageFromURL URL = %q, want %q", img.URL, "https://example.com/photo.jpg")
+	}
+	if img.MIME != "image/jpeg" {
+		t.Errorf("ImageFromURL MIME = %q, want %q", img.MIME, "image/jpeg")
+	}
+
+	img2 := ImageFromURL("https://example.com/pic.png")
+	if img2.MIME != "image/png" {
+		t.Errorf("ImageFromURL PNG MIME = %q, want %q", img2.MIME, "image/png")
+	}
+}
+
+func TestImageFromPartDataURL(t *testing.T) {
+	part := map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "data:image/png;base64," + "iVBORw0KGgo=",
+		},
+	}
+	img, ok := ImageFromPart(part)
+	if !ok {
+		t.Fatal("ImageFromPart should succeed for data URL")
+	}
+	if img.MIME != "image/png" {
+		t.Errorf("ImageFromPart MIME = %q, want %q", img.MIME, "image/png")
+	}
+	if len(img.Data) == 0 {
+		t.Error("ImageFromPart should have data")
+	}
+}
+
+func TestImageFromPartRemoteURL(t *testing.T) {
+	part := map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "https://example.com/photo.jpg",
+		},
+	}
+	img, ok := ImageFromPart(part)
+	if !ok {
+		t.Fatal("ImageFromPart should succeed for remote URL")
+	}
+	if img.URL != "https://example.com/photo.jpg" {
+		t.Errorf("ImageFromPart URL = %q, want %q", img.URL, "https://example.com/photo.jpg")
+	}
+}
+
+func TestImageFromPartInputImage(t *testing.T) {
+	part := map[string]any{
+		"type": "input_image",
+		"data": "SGVsbG8=",
+		"mime": "image/jpeg",
+	}
+	img, ok := ImageFromPart(part)
+	if !ok {
+		t.Fatal("ImageFromPart should succeed for input_image")
+	}
+	if img.MIME != "image/jpeg" {
+		t.Errorf("ImageFromPart MIME = %q, want %q", img.MIME, "image/jpeg")
+	}
+	if string(img.Data) != "Hello" {
+		t.Errorf("ImageFromPart data = %q, want %q", string(img.Data), "Hello")
+	}
+}
+
+func TestImageFromPartUnsupported(t *testing.T) {
+	part := map[string]any{
+		"type": "text",
+		"text": "hello",
+	}
+	_, ok := ImageFromPart(part)
+	if ok {
+		t.Error("ImageFromPart should fail for text type")
+	}
+}
+
+func TestMessagesToPromptWithImages(t *testing.T) {
+	req := models.OpenAIChatRequest{
+		Messages: []models.OpenAIMessage{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Look at this image"},
+					map[string]any{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": "data:image/png;base64," + "iVBORw0KGgo=",
+						},
+					},
+				},
+			},
+		},
+		ToolChoice: "auto",
+	}
+
+	prompt, images, err := MessagesToPrompt(req)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(images) != 1 {
+		t.Fatalf("Expected 1 image, got %d", len(images))
+	}
+	if !strings.Contains(prompt, "[Image attached]") {
+		t.Errorf("Prompt should contain [Image attached], got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Look at this image") {
+		t.Errorf("Prompt should contain text, got %q", prompt)
+	}
+}
+
+func TestToolSlimming(t *testing.T) {
+	// Create enough tools to exceed 30KB threshold
+	var tools []models.OpenAITool
+	for i := 0; i < 200; i++ {
+		tools = append(tools, models.OpenAITool{
+			Function: models.OpenAIFunction{
+				Name:        "tool_" + strings.Repeat("x", 100),
+				Description: strings.Repeat("description with <html> chars ", 50),
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"param1": map[string]any{"type": "string", "description": strings.Repeat("param desc ", 20)},
+					},
+				},
+			},
+		})
+	}
+
+	req := models.OpenAIChatRequest{
+		Messages: []models.OpenAIMessage{
+			{Role: "user", Content: "test"},
+		},
+		Tools:      tools,
+		ToolChoice: "auto",
+	}
+
+	prompt, _, err := MessagesToPrompt(req)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// The prompt should still contain the tool definitions section (slimmed)
+	// Verify slimming happened: the log message "Tool defs too large ... slimming"
+	// confirms the threshold was hit. With 200 large tools, even slimmed output is substantial.
+	// The key verification is that the function doesn't error and produces a valid prompt.
+	if !strings.Contains(prompt, "# Tool Use") {
+		t.Errorf("Prompt should contain tool section, got length %d", len(prompt))
 	}
 }
 

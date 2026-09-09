@@ -74,6 +74,13 @@ func main() {
 
 	app := server.New(cfg, currentVersion)
 
+	// Blocking BL refresh at startup - never fail boot on error.
+	if newBL, changed, blErr := app.Gem.UpdateBLIfNeeded(); blErr != nil {
+		log.Printf("BL auto-update failed (non-fatal): %v", blErr)
+	} else if changed {
+		log.Printf("BL auto-updated: %s -> %s", cfg.GeminiBL, newBL)
+	}
+
 	modelKeys := make([]string, 0, len(models.MODELS))
 	for k := range models.MODELS {
 		modelKeys = append(modelKeys, k)
@@ -94,6 +101,11 @@ func main() {
 		impersonateStatus = "none (stdlib)"
 	}
 
+	temporaryStatus := "no"
+	if cfg.TemporaryChats {
+		temporaryStatus = "yes"
+	}
+
 	fmt.Printf("gemini-web2api %s\n", currentVersion)
 	fmt.Printf("  Listening:   http://%s:%d\n", cfg.Host, cfg.Port)
 	fmt.Printf("  Base URL:    http://localhost:%d/v1\n", cfg.Port)
@@ -101,6 +113,7 @@ func main() {
 	fmt.Printf("  Cookie:      %s\n", cookieStatus)
 	fmt.Printf("  Proxy:       %s\n", proxyStatus)
 	fmt.Printf("  Impersonate: %s\n", impersonateStatus)
+	fmt.Printf("  Temporary:   %s\n", temporaryStatus)
 	fmt.Println()
 
 	srv := &http.Server{

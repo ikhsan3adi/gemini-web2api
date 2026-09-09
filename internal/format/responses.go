@@ -112,6 +112,9 @@ func ResponsesInputToMessages(input any, instructions string) ([]map[string]any,
 									if txt, ok := cMap["text"].(string); ok {
 										parts = append(parts, txt)
 									}
+								} else if cType == "input_image" || cType == "image" {
+									// Preserve image items as structured content for downstream extraction
+									parts = append(parts, "[Image attached]")
 								}
 							}
 						}

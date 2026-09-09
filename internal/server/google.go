@@ -67,8 +67,13 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fileRefs := a.uploadImages(images)
-	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d", resolved.Name, stream, hasTools, len(prompt))
+	fileRefs, err := a.uploadImages(images)
+	if err != nil {
+		a.Logf("Google API image upload error: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("image upload failed: %v", err)}})
+		return
+	}
+	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(prompt), len(fileRefs))
 
 	if stream && !hasTools {
 		if !startSSE(w) {

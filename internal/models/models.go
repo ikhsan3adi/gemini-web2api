@@ -18,10 +18,15 @@ type Model struct {
 }
 
 var MODELS = map[string]Model{
+	"gemini-3.7-flash": {
+		Mode:  1,
+		Think: 4,
+		Desc:  "Latest all-around model (Gemini 3.7 Flash)",
+	},
 	"gemini-3.6-flash": {
 		Mode:  1,
 		Think: 4,
-		Desc:  "Latest all-around model (Gemini 3.6 Flash)",
+		Desc:  "All-around model (Gemini 3.6 Flash)",
 	},
 	"gemini-3.5-flash": {
 		Mode:  1,

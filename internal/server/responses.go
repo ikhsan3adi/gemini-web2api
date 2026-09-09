@@ -82,13 +82,24 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		ToolChoice: toolChoice,
 	}
 
-	prompt, err := format.MessagesToPrompt(chatReq)
+	prompt, images, err := format.MessagesToPrompt(chatReq)
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty input"}})
 		return
 	}
 
-	text, err := a.Gem.Generate(prompt, resolved.Mode, resolved.Think, nil, resolved.Extra)
+	// Upload images to Gemini storage.
+	var fileRefs []string
+	if len(images) > 0 {
+		fileRefs, err = a.uploadImages(images)
+		if err != nil {
+			a.Logf("Image upload error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("image upload failed: %v", err)}})
+			return
+		}
+	}
+
+	text, err := a.Gem.Generate(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
@@ -116,50 +127,141 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		evCreated := map[string]any{
-			"type": "response.created",
-			"response": map[string]any{
-				"id":     rid,
-				"object": "response",
-				"status": "in_progress",
-				"model":  resolved.Name,
-				"output": []any{},
-			},
-		}
-		_ = writeSSEEvent(w, "response.created", evCreated)
+		seqNum := 0
 
-		for _, item := range outputItems {
+		// Build initial empty response for response.created
+		createdResp := map[string]any{
+			"id":            rid,
+			"object":        "response",
+			"status":        "in_progress",
+			"model":         resolved.Name,
+			"output":        []any{},
+			"sequence_number": seqNum,
+		}
+		_ = writeSSEEvent(w, "response.created", map[string]any{
+			"type":     "response.created",
+			"response": createdResp,
+		})
+		seqNum++
+
+		// response.in_progress
+		_ = writeSSEEvent(w, "response.in_progress", map[string]any{
+			"type":     "response.in_progress",
+			"response": createdResp,
+		})
+
+		for itemIdx, item := range outputItems {
 			iType, _ := item["type"].(string)
+			itemID, _ := item["id"].(string)
+
 			if iType == "function_call" {
-				evDone := map[string]any{
+				// output_item.added (function_call)
+				_ = writeSSEEvent(w, "response.output_item.added", map[string]any{
+					"type":          "response.output_item.added",
+					"output_index":  itemIdx,
+					"item":          item,
+					"sequence_number": seqNum,
+				})
+				seqNum++
+
+				// function_call_arguments.delta
+				args, _ := item["arguments"].(string)
+				_ = writeSSEEvent(w, "response.function_call_arguments.delta", map[string]any{
+					"type":      "response.function_call_arguments.delta",
+					"item_id":   itemID,
+					"call_id":   item["call_id"],
+					"delta":     args,
+					"sequence_number": seqNum,
+				})
+				seqNum++
+
+				// function_call_arguments.done
+				_ = writeSSEEvent(w, "response.function_call_arguments.done", map[string]any{
 					"type":      "response.function_call_arguments.done",
-					"item_id":   item["id"],
+					"item_id":   itemID,
 					"call_id":   item["call_id"],
 					"name":      item["name"],
-					"arguments": item["arguments"],
-				}
-				_ = writeSSEEvent(w, "response.function_call_arguments.done", evDone)
+					"arguments": args,
+					"sequence_number": seqNum,
+				})
+				seqNum++
+
+				// output_item.done (function_call)
+				_ = writeSSEEvent(w, "response.output_item.done", map[string]any{
+					"type":          "response.output_item.done",
+					"output_index":  itemIdx,
+					"item":          item,
+					"sequence_number": seqNum,
+				})
+				seqNum++
+
 			} else if iType == "message" {
 				if content, ok := item["content"].([]map[string]any); ok {
 					for ci, cp := range content {
-						evDone := map[string]any{
-							"type":          "response.output_text.done",
-							"item_id":       item["id"],
-							"content_index": ci,
-							"text":          cp["text"],
-						}
-						_ = writeSSEEvent(w, "response.output_text.done", evDone)
+						// content_part.added
+						_ = writeSSEEvent(w, "response.content_part.added", map[string]any{
+							"type":           "response.content_part.added",
+							"output_index":   itemIdx,
+							"content_index":  ci,
+							"part":           cp,
+							"sequence_number": seqNum,
+						})
+						seqNum++
+
+						// output_text.delta
+						text, _ := cp["text"].(string)
+						_ = writeSSEEvent(w, "response.output_text.delta", map[string]any{
+							"type":           "response.output_text.delta",
+							"item_id":        itemID,
+							"output_index":   itemIdx,
+							"content_index":  ci,
+							"delta":          text,
+							"sequence_number": seqNum,
+						})
+						seqNum++
+
+						// output_text.done
+						_ = writeSSEEvent(w, "response.output_text.done", map[string]any{
+							"type":           "response.output_text.done",
+							"item_id":        itemID,
+							"output_index":   itemIdx,
+							"content_index":  ci,
+							"text":           text,
+							"sequence_number": seqNum,
+						})
+						seqNum++
+
+						// content_part.done
+						_ = writeSSEEvent(w, "response.content_part.done", map[string]any{
+							"type":           "response.content_part.done",
+							"output_index":   itemIdx,
+							"content_index":  ci,
+							"part":           cp,
+							"sequence_number": seqNum,
+						})
+						seqNum++
 					}
 				}
+
+				// output_item.done (message)
+				_ = writeSSEEvent(w, "response.output_item.done", map[string]any{
+					"type":          "response.output_item.done",
+					"output_index":  itemIdx,
+					"item":          item,
+					"sequence_number": seqNum,
+				})
+				seqNum++
 			}
 		}
 
+		// response.completed
 		respObj := map[string]any{
-			"id":     rid,
-			"object": "response",
-			"status": "completed",
-			"model":  resolved.Name,
-			"output": outputItems,
+			"id":               rid,
+			"object":           "response",
+			"status":           "completed",
+			"model":            resolved.Name,
+			"output":           outputItems,
+			"sequence_number":  seqNum,
 			"usage": map[string]any{
 				"input_tokens":  promptTokens,
 				"output_tokens": outputTokens,

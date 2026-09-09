@@ -21,6 +21,7 @@ type Config struct {
 	Proxy             string   `json:"proxy"`
 	APIKeys           []string `json:"api_keys"`
 	Impersonate       string   `json:"impersonate"`
+	TemporaryChats    bool     `json:"temporary_chats"`
 }
 
 func Default() Config {
@@ -39,6 +40,7 @@ func Default() Config {
 		Proxy:             "",
 		APIKeys:           []string{},
 		Impersonate:       "",
+		TemporaryChats:    false,
 	}
 }
 
@@ -71,6 +73,7 @@ func Load(path string) (Config, error) {
 		Proxy             *string   `json:"proxy"`
 		APIKeys           *[]string `json:"api_keys"`
 		Impersonate       *string   `json:"impersonate"`
+		TemporaryChats    *bool     `json:"temporary_chats"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -118,6 +121,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.Impersonate != nil {
 		cfg.Impersonate = *aux.Impersonate
+	}
+	if aux.TemporaryChats != nil {
+		cfg.TemporaryChats = *aux.TemporaryChats
 	}
 
 	return cfg, nil

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
@@ -32,6 +33,8 @@ type Client struct {
 	HTTP    Requester
 	Cookies *CookieCache
 	Logf    func(format string, args ...any)
+	blMu    sync.Mutex
+	bl      string
 }
 
 func NewClient(cfg config.Config) *Client {
@@ -78,7 +81,43 @@ func NewClient(cfg config.Config) *Client {
 		HTTP:    req,
 		Cookies: NewCookieCache(cfg.CookieFile),
 		Logf:    logFn,
+		bl:      cfg.GeminiBL,
 	}
+}
+
+// CurrentBL returns the current BL value, preferring the mutable field over config.
+func (c *Client) CurrentBL() string {
+	c.blMu.Lock()
+	defer c.blMu.Unlock()
+	if c.bl != "" {
+		return c.bl
+	}
+	return c.Cfg.GeminiBL
+}
+
+// SetBL updates the BL value.
+func (c *Client) SetBL(bl string) {
+	c.blMu.Lock()
+	defer c.blMu.Unlock()
+	c.bl = bl
+}
+
+// UpdateBLIfNeeded fetches the latest BL from Gemini and updates it if different from current.
+// Returns (newBL, changed, error).
+func (c *Client) UpdateBLIfNeeded() (string, bool, error) {
+	newBL, err := FetchLatestBL(c.HTTP)
+	if err != nil {
+		return "", false, err
+	}
+	if newBL == "" {
+		return "", false, fmt.Errorf("empty BL fetched")
+	}
+	oldBL := c.CurrentBL()
+	if newBL == oldBL {
+		return newBL, false, nil
+	}
+	c.SetBL(newBL)
+	return newBL, true, nil
 }
 
 func (c *Client) buildHeaders() http.Header {
@@ -139,8 +178,9 @@ func (c *Client) triageStatus(resp *http.Response) error {
 
 func (c *Client) Generate(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any) (string, error) {
 	bodyStr := BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
-	reqURL := BuildURL(c.Cfg)
+	reqURL := BuildURL(c.Cfg, c.CurrentBL())
 	headers := c.buildHeaders()
+	blRefreshed := false
 
 	var lastErr error
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
@@ -156,6 +196,17 @@ func (c *Client) Generate(prompt string, modelID, thinkMode int, fileRefs []stri
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
+				// 405 = BL expired. Refresh once and retry without consuming an attempt.
+				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
+					blRefreshed = true
+					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
+						c.Logf("BL auto-updated, retrying request")
+						bodyStr = BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
+						reqURL = BuildURL(c.Cfg, c.CurrentBL())
+						attempt-- // retry without consuming an attempt
+						continue
+					}
+				}
 				lastErr = err
 			} else {
 				rawBytes, err := io.ReadAll(resp.Body)
@@ -184,8 +235,9 @@ func (c *Client) Generate(prompt string, modelID, thinkMode int, fileRefs []stri
 
 func (c *Client) GenerateStream(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any, emit func(string) error) error {
 	bodyStr := BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
-	reqURL := BuildURL(c.Cfg)
+	reqURL := BuildURL(c.Cfg, c.CurrentBL())
 	headers := c.buildHeaders()
+	blRefreshed := false
 
 	parser := NewStreamParser()
 	var lastErr error
@@ -207,6 +259,17 @@ func (c *Client) GenerateStream(prompt string, modelID, thinkMode int, fileRefs 
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
+				// 405 = BL expired. Refresh once and retry without consuming an attempt.
+				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
+					blRefreshed = true
+					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
+						c.Logf("BL auto-updated, retrying stream request")
+						bodyStr = BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
+						reqURL = BuildURL(c.Cfg, c.CurrentBL())
+						attempt-- // retry without consuming an attempt
+						continue
+					}
+				}
 				lastErr = err
 			} else {
 				err = c.streamAttempt(resp.Body, parser, emit)

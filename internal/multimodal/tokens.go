@@ -75,6 +75,9 @@ func (c *TokenCache) fetchPageTokens() PageTokens {
 	if cookieInfo.Cookie != "" {
 		req.Header.Set("Cookie", cookieInfo.Cookie)
 	}
+	if cookieInfo.SAPISID != "" {
+		req.Header.Set("Authorization", gemini.SAPISIDHash(cookieInfo.SAPISID))
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {

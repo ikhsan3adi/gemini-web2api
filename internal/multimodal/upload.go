@@ -100,6 +100,11 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 }
 
 func FetchImageBytes(client gemini.Requester, imageURL string) ([]byte, error) {
+	// SSRF guard: only allow http/https schemes
+	if !strings.HasPrefix(imageURL, "http://") && !strings.HasPrefix(imageURL, "https://") {
+		return nil, fmt.Errorf("invalid image URL scheme, only http/https allowed")
+	}
+
 	req, err := http.NewRequest("GET", imageURL, nil)
 	if err != nil {
 		return nil, err

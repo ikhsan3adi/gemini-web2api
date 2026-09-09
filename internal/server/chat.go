@@ -40,10 +40,21 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		req.ToolChoice = "auto"
 	}
 
-	prompt, err := format.MessagesToPrompt(req)
+	prompt, images, err := format.MessagesToPrompt(req)
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return
+	}
+
+	// Upload images to Gemini storage.
+	var fileRefs []string
+	if len(images) > 0 {
+		fileRefs, err = a.uploadImages(images)
+		if err != nil {
+			a.Logf("Image upload error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("image upload failed: %v", err)}})
+			return
+		}
 	}
 
 	cid := fmt.Sprintf("chatcmpl-%s", format.RandHex(12))
@@ -56,7 +67,25 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		emitErr := a.Gem.GenerateStream(prompt, resolved.Mode, resolved.Think, nil, resolved.Extra, func(delta string) error {
+		// Emit first chunk with role to match OpenAI streaming protocol.
+		firstChunk := models.OpenAIChatResponse{
+			ID:      cid,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   resolved.Name,
+			Choices: []models.OpenAIChoice{
+				{
+					Index: 0,
+					Delta: &models.OpenAIMessage{
+						Role: "assistant",
+					},
+					FinishReason: nil,
+				},
+			},
+		}
+		_ = writeSSEData(w, firstChunk)
+
+		emitErr := a.Gem.GenerateStream(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra, func(delta string) error {
 			chunk := models.OpenAIChatResponse{
 				ID:      cid,
 				Object:  "chat.completion.chunk",
@@ -98,7 +127,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text, err := a.Gem.Generate(prompt, resolved.Mode, resolved.Think, nil, resolved.Extra)
+	text, err := a.Gem.Generate(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return

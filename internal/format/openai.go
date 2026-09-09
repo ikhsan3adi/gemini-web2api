@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
+	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
 
 func RandHex(n int) string {
@@ -17,6 +19,124 @@ func RandHex(n int) string {
 	return hex.EncodeToString(bytes)[:n]
 }
 
+// DecodeDataURL decodes a `data:<mime>;base64,<payload>` URL into bytes and MIME.
+func DecodeDataURL(dataURL string) ([]byte, string, error) {
+	const prefix = "data:"
+	if !strings.HasPrefix(dataURL, prefix) {
+		return nil, "", fmt.Errorf("not a data URL")
+	}
+	semiIdx := strings.Index(dataURL, ";")
+	if semiIdx == -1 || semiIdx+1 >= len(dataURL) {
+		return nil, "", fmt.Errorf("invalid data URL format")
+	}
+	mime := dataURL[len(prefix):semiIdx]
+
+	b64Idx := strings.Index(dataURL, "base64,")
+	if b64Idx == -1 {
+		return nil, "", fmt.Errorf("data URL must be base64-encoded")
+	}
+	b64Payload := dataURL[b64Idx+len("base64,"):]
+	decoded, err := multimodal.DecodeBase64Raw(b64Payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("base64 decode failed: %w", err)
+	}
+	if mime == "" {
+		mime = multimodal.DetectImageMime(decoded)
+	}
+	return decoded, mime, nil
+}
+
+// ImageFromURL returns an Image with URL set for remote passthrough.
+func ImageFromURL(rawURL string) Image {
+	// Try to extract MIME from URL extension
+	mime := "image/png"
+	if extIdx := strings.LastIndex(rawURL, "."); extIdx != -1 {
+		ext := strings.ToLower(rawURL[extIdx:])
+		// Strip query params
+		if qIdx := strings.Index(ext, "?"); qIdx != -1 {
+			ext = ext[:qIdx]
+		}
+		switch ext {
+		case ".jpg", ".jpeg":
+			mime = "image/jpeg"
+		case ".png":
+			mime = "image/png"
+		case ".gif":
+			mime = "image/gif"
+		case ".webp":
+			mime = "image/webp"
+		case ".bmp":
+			mime = "image/bmp"
+		case ".svg":
+			mime = "image/svg+xml"
+		}
+	}
+	return Image{URL: rawURL, MIME: mime}
+}
+
+// ImageFromPart parses an OpenAI-style content part (image_url, input_image, image) into an Image.
+func ImageFromPart(mapItem map[string]any) (Image, bool) {
+	iType, _ := mapItem["type"].(string)
+
+	switch iType {
+	case "image_url":
+		if urlObj, ok := mapItem["image_url"].(map[string]any); ok {
+			if url, ok := urlObj["url"].(string); ok && url != "" {
+				if strings.HasPrefix(url, "data:") {
+					data, mime, err := DecodeDataURL(url)
+					if err != nil {
+						return Image{}, false
+					}
+					return Image{Data: data, MIME: mime}, true
+				}
+				return ImageFromURL(url), true
+			}
+		}
+	case "input_image":
+		// OpenAI input_image: {"type":"input_image","data":"<base64>","mime":"..."} or {"type":"input_image","url":"..."}
+		if url, ok := mapItem["url"].(string); ok && url != "" {
+			if strings.HasPrefix(url, "data:") {
+				data, mime, err := DecodeDataURL(url)
+				if err != nil {
+					return Image{}, false
+				}
+				return Image{Data: data, MIME: mime}, true
+			}
+			return ImageFromURL(url), true
+		}
+		if data, ok := mapItem["data"].(string); ok && data != "" {
+			mime, _ := mapItem["mime"].(string)
+			decoded, err := multimodal.DecodeBase64Raw(data)
+			if err != nil {
+				return Image{}, false
+			}
+			if mime == "" {
+				mime = multimodal.DetectImageMime(decoded)
+			}
+			return Image{Data: decoded, MIME: mime}, true
+		}
+	case "image":
+		// Google-style inline_data embedded in OpenAI content
+		if url, ok := mapItem["url"].(string); ok && url != "" {
+			return ImageFromURL(url), true
+		}
+		if data, ok := mapItem["data"].(string); ok && data != "" {
+			mime, _ := mapItem["mime"].(string)
+			decoded, err := multimodal.DecodeBase64Raw(data)
+			if err != nil {
+				return Image{}, false
+			}
+			if mime == "" {
+				mime = multimodal.DetectImageMime(decoded)
+			}
+			return Image{Data: decoded, MIME: mime}, true
+		}
+	}
+
+	return Image{}, false
+}
+
+// BuildToolChoiceInstruction returns a prompt suffix based on the tool_choice parameter.
 func BuildToolChoiceInstruction(toolChoice any) string {
 	if strChoice, ok := toolChoice.(string); ok {
 		if strChoice == "none" {
@@ -35,8 +155,9 @@ func BuildToolChoiceInstruction(toolChoice any) string {
 	return ""
 }
 
-func MessagesToPrompt(req models.OpenAIChatRequest) (string, error) {
+func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 	var parts []string
+	var images []Image
 
 	strChoice, isStr := req.ToolChoice.(string)
 	if !(isStr && strChoice == "none") && len(req.Tools) > 0 {
@@ -62,6 +183,18 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, error) {
 		if len(toolDefs) > 0 {
 			constraint := BuildToolChoiceInstruction(req.ToolChoice)
 			defsJSON, _ := json.Marshal(toolDefs)
+			// Tool slimming: if tool definitions exceed 30KB, re-marshal with name+description only.
+			if len(defsJSON) > 30000 {
+				log.Printf("Tool defs too large (%d bytes), slimming to name+description only", len(defsJSON))
+				slimmed := make([]models.OpenAIFunction, len(toolDefs))
+				for i, fn := range toolDefs {
+					slimmed[i] = models.OpenAIFunction{
+						Name:        fn.Name,
+						Description: fn.Description,
+					}
+				}
+				defsJSON, _ = json.Marshal(slimmed)
+			}
 			parts = append(parts, fmt.Sprintf(
 				"# Tool Use\n\n"+
 					"You can call the following tools. Call format:\n"+
@@ -92,8 +225,11 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, error) {
 						if t, ok := mapItem["text"].(string); ok {
 							textParts = append(textParts, t)
 						}
-					} else if iType == "image_url" || iType == "image" {
-						textParts = append(textParts, "[Note: Image input not supported in this API. Please describe the image in text.]")
+					} else if iType == "image_url" || iType == "input_image" || iType == "image" {
+						if img, ok := ImageFromPart(mapItem); ok {
+							images = append(images, img)
+							textParts = append(textParts, "[Image attached]")
+						}
 					}
 				}
 			}
@@ -126,7 +262,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, error) {
 		}
 	}
 
-	return strings.Join(parts, "\n\n"), nil
+	return strings.Join(parts, "\n\n"), images, nil
 }
 
 var reToolCall = regexp.MustCompile(`(?s)\x60\x60\x60tool_call\s*\n(.*?)\n\x60\x60\x60`)

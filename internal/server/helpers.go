@@ -91,9 +91,9 @@ func writeSSEDone(w http.ResponseWriter) error {
 	return nil
 }
 
-func (a *App) uploadImages(images []format.Image) []string {
+func (a *App) uploadImages(images []format.Image) ([]string, error) {
 	if len(images) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	tokens := a.Tokens.Get()
@@ -108,24 +108,43 @@ func (a *App) uploadImages(images []format.Image) []string {
 		}
 	}
 
-	for _, img := range images {
+	for i, img := range images {
 		data := img.Data
-		if len(data) == 0 {
-			continue
+
+		// If image has URL but no data, fetch the bytes first.
+		if len(data) == 0 && img.URL != "" {
+			fetched, err := multimodal.FetchImageBytes(requester, img.URL)
+			if err != nil {
+				return nil, fmt.Errorf("image %d fetch failed: %w", i, err)
+			}
+			if len(fetched) == 0 {
+				return nil, fmt.Errorf("image %d fetch returned empty data", i)
+			}
+			data = fetched
 		}
 
-		ref, err := multimodal.UploadImage(requester, tokens, data, img.MIME, a.Gem.Cookies, a.Cfg.AuthUser)
+		if len(data) == 0 {
+			return nil, fmt.Errorf("image %d has no data", i)
+		}
+
+		// Detect MIME from magic bytes if not set or generic.
+		mime := img.MIME
+		if mime == "" || mime == "image/png" {
+			mime = multimodal.DetectImageMime(data)
+		}
+
+		ref, err := multimodal.UploadImage(requester, tokens, data, mime, a.Gem.Cookies, a.Cfg.AuthUser)
 		if err != nil {
-			a.Logf("Image upload failed: %v", err)
-			continue
+			return nil, fmt.Errorf("image %d upload failed: %w", i, err)
 		}
-		if ref != "" {
-			fileRefs = append(fileRefs, ref)
+		if ref == "" {
+			return nil, fmt.Errorf("image %d upload returned empty reference", i)
 		}
+		fileRefs = append(fileRefs, ref)
 	}
 
 	if len(fileRefs) == 0 {
-		return nil
+		return nil, nil
 	}
-	return fileRefs
+	return fileRefs, nil
 }
