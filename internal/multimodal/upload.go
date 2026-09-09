@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
@@ -100,8 +101,9 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 }
 
 func FetchImageBytes(client gemini.Requester, imageURL string) ([]byte, error) {
-	// SSRF guard: only allow http/https schemes
-	if !strings.HasPrefix(imageURL, "http://") && !strings.HasPrefix(imageURL, "https://") {
+	// SSRF guard: only allow http/https schemes (parsed, not prefix-matched).
+	parsed, err := url.Parse(strings.TrimSpace(imageURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, fmt.Errorf("invalid image URL scheme, only http/https allowed")
 	}
 

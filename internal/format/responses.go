@@ -101,31 +101,47 @@ func ResponsesInputToMessages(input any, instructions string) ([]map[string]any,
 					if role == "" {
 						role = "user"
 					}
-					var contentStr string
+					// Preserve raw content (list or string) so downstream
+					// MessagesToPrompt can extract image parts. Flattening to
+					// a string here would silently drop image data.
 					rawContent := mapItem["content"]
+					if rawContent == nil {
+						rawContent = ""
+					}
 					if cList, ok := rawContent.([]any); ok {
-						var parts []string
+						// Normalize text-only lists to a joined string for
+						// cleaner prompts, but keep the list when it contains
+						// image parts.
+						hasImage := false
 						for _, c := range cList {
 							if cMap, ok := c.(map[string]any); ok {
-								cType, _ := cMap["type"].(string)
-								if cType == "text" || cType == "input_text" {
-									if txt, ok := cMap["text"].(string); ok {
-										parts = append(parts, txt)
-									}
-								} else if cType == "input_image" || cType == "image" {
-									// Preserve image items as structured content for downstream extraction
-									parts = append(parts, "[Image attached]")
+								if _, ok := ImageFromPart(cMap); ok {
+									hasImage = true
+									break
 								}
 							}
 						}
-						contentStr = strings.Join(parts, " ")
-					} else if strC, ok := rawContent.(string); ok {
-						contentStr = strC
+						if !hasImage {
+							var parts []string
+							for _, c := range cList {
+								if cMap, ok := c.(map[string]any); ok {
+									cType, _ := cMap["type"].(string)
+									if cType == "text" || cType == "input_text" || cType == "output_text" {
+										if txt, ok := cMap["text"].(string); ok {
+											parts = append(parts, txt)
+										}
+									}
+								} else if s, ok := c.(string); ok {
+									parts = append(parts, s)
+								}
+							}
+							rawContent = strings.Join(parts, " ")
+						}
 					}
 
 					messages = append(messages, map[string]any{
 						"role":    role,
-						"content": contentStr,
+						"content": rawContent,
 					})
 				}
 			}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -13,34 +14,43 @@ import (
 	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
 
+var reDataURL = regexp.MustCompile(`(?s)^data:([^;,]+)?(;base64)?,(.*)$`)
+
 func RandHex(n int) string {
 	bytes := make([]byte, (n+1)/2)
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)[:n]
 }
 
-// DecodeDataURL decodes a `data:<mime>;base64,<payload>` URL into bytes and MIME.
+// DecodeDataURL decodes a `data:<mime>[;base64],<payload>` URL into bytes and MIME.
+// Mirrors upstream _decode_data_url: base64 payloads are strictly decoded,
+// non-base64 payloads are percent-decoded.
 func DecodeDataURL(dataURL string) ([]byte, string, error) {
-	const prefix = "data:"
-	if !strings.HasPrefix(dataURL, prefix) {
+	m := reDataURL.FindStringSubmatch(dataURL)
+	if m == nil {
 		return nil, "", fmt.Errorf("not a data URL")
 	}
-	semiIdx := strings.Index(dataURL, ";")
-	if semiIdx == -1 || semiIdx+1 >= len(dataURL) {
-		return nil, "", fmt.Errorf("invalid data URL format")
-	}
-	mime := dataURL[len(prefix):semiIdx]
-
-	b64Idx := strings.Index(dataURL, "base64,")
-	if b64Idx == -1 {
-		return nil, "", fmt.Errorf("data URL must be base64-encoded")
-	}
-	b64Payload := dataURL[b64Idx+len("base64,"):]
-	decoded, err := multimodal.DecodeBase64Raw(b64Payload)
-	if err != nil {
-		return nil, "", fmt.Errorf("base64 decode failed: %w", err)
-	}
+	mime := m[1]
 	if mime == "" {
+		mime = "image/png"
+	}
+	payload := m[3]
+	if m[2] != "" {
+		decoded, err := multimodal.DecodeBase64Raw(payload)
+		if err != nil {
+			return nil, "", fmt.Errorf("base64 decode failed: %w", err)
+		}
+		if m[1] == "" {
+			mime = multimodal.DetectImageMime(decoded)
+		}
+		return decoded, mime, nil
+	}
+	decodedStr, err := url.PathUnescape(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("data URL percent-decode failed: %w", err)
+	}
+	decoded := []byte(decodedStr)
+	if m[1] == "" {
 		mime = multimodal.DetectImageMime(decoded)
 	}
 	return decoded, mime, nil
@@ -74,55 +84,91 @@ func ImageFromURL(rawURL string) Image {
 	return Image{URL: rawURL, MIME: mime}
 }
 
+// imageFromURLString resolves a URL string (remote or data:) into an Image.
+func imageFromURLString(rawURL, mimeHint string) (Image, bool) {
+	if rawURL == "" {
+		return Image{}, false
+	}
+	if strings.HasPrefix(rawURL, "data:") {
+		data, mime, err := DecodeDataURL(rawURL)
+		if err != nil {
+			return Image{}, false
+		}
+		return Image{Data: data, MIME: mime}, true
+	}
+	img := ImageFromURL(rawURL)
+	if mimeHint != "" {
+		img.MIME = mimeHint
+	}
+	return img, true
+}
+
+func partMime(m map[string]any) string {
+	for _, k := range []string{"mime_type", "mime", "media_type"} {
+		if s, _ := m[k].(string); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // ImageFromPart parses an OpenAI-style content part (image_url, input_image, image) into an Image.
+// Mirrors upstream _image_from_part, including image_url as a plain string.
 func ImageFromPart(mapItem map[string]any) (Image, bool) {
 	iType, _ := mapItem["type"].(string)
 
 	switch iType {
 	case "image_url":
-		if urlObj, ok := mapItem["image_url"].(map[string]any); ok {
-			if url, ok := urlObj["url"].(string); ok && url != "" {
-				if strings.HasPrefix(url, "data:") {
-					data, mime, err := DecodeDataURL(url)
-					if err != nil {
-						return Image{}, false
-					}
-					return Image{Data: data, MIME: mime}, true
-				}
-				return ImageFromURL(url), true
-			}
+		raw := mapItem["image_url"]
+		if urlObj, ok := raw.(map[string]any); ok {
+			urlStr, _ := urlObj["url"].(string)
+			mimeHint := partMime(urlObj)
+			return imageFromURLString(urlStr, mimeHint)
 		}
-	case "input_image":
-		// OpenAI input_image: {"type":"input_image","data":"<base64>","mime":"..."} or {"type":"input_image","url":"..."}
-		if url, ok := mapItem["url"].(string); ok && url != "" {
-			if strings.HasPrefix(url, "data:") {
-				data, mime, err := DecodeDataURL(url)
+		if urlStr, ok := raw.(string); ok {
+			return imageFromURLString(urlStr, "")
+		}
+	case "input_image", "image":
+		var urlRaw any
+		if u, ok := mapItem["image_url"]; ok {
+			urlRaw = u
+		} else if u, ok := mapItem["url"]; ok {
+			urlRaw = u
+		}
+		if urlObj, ok := urlRaw.(map[string]any); ok {
+			urlStr, _ := urlObj["url"].(string)
+			mimeHint := partMime(urlObj)
+			if mimeHint == "" {
+				mimeHint = partMime(mapItem)
+			}
+			if urlStr != "" {
+				return imageFromURLString(urlStr, mimeHint)
+			}
+		} else if urlStr, ok := urlRaw.(string); ok && urlStr != "" {
+			if mimeHint := partMime(mapItem); mimeHint != "" {
+				return imageFromURLString(urlStr, mimeHint)
+			}
+			return imageFromURLString(urlStr, "")
+		}
+		var imageData string
+		if s, ok := mapItem["data"].(string); ok && s != "" {
+			imageData = s
+		} else if s, ok := mapItem["base64"].(string); ok && s != "" {
+			imageData = s
+		}
+		if imageData != "" {
+			mime := partMime(mapItem)
+			if strings.HasPrefix(imageData, "data:") {
+				data, decMime, err := DecodeDataURL(imageData)
 				if err != nil {
 					return Image{}, false
 				}
+				if mime == "" {
+					mime = decMime
+				}
 				return Image{Data: data, MIME: mime}, true
 			}
-			return ImageFromURL(url), true
-		}
-		if data, ok := mapItem["data"].(string); ok && data != "" {
-			mime, _ := mapItem["mime"].(string)
-			decoded, err := multimodal.DecodeBase64Raw(data)
-			if err != nil {
-				return Image{}, false
-			}
-			if mime == "" {
-				mime = multimodal.DetectImageMime(decoded)
-			}
-			return Image{Data: decoded, MIME: mime}, true
-		}
-	case "image":
-		// Google-style inline_data embedded in OpenAI content
-		if url, ok := mapItem["url"].(string); ok && url != "" {
-			return ImageFromURL(url), true
-		}
-		if data, ok := mapItem["data"].(string); ok && data != "" {
-			mime, _ := mapItem["mime"].(string)
-			decoded, err := multimodal.DecodeBase64Raw(data)
+			decoded, err := multimodal.DecodeBase64Raw(imageData)
 			if err != nil {
 				return Image{}, false
 			}
@@ -221,16 +267,16 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 			for _, item := range contentList {
 				if mapItem, ok := item.(map[string]any); ok {
 					iType, _ := mapItem["type"].(string)
-					if iType == "text" || iType == "input_text" {
+					if iType == "text" || iType == "input_text" || iType == "output_text" {
 						if t, ok := mapItem["text"].(string); ok {
 							textParts = append(textParts, t)
 						}
-					} else if iType == "image_url" || iType == "input_image" || iType == "image" {
-						if img, ok := ImageFromPart(mapItem); ok {
-							images = append(images, img)
-							textParts = append(textParts, "[Image attached]")
-						}
+					} else if img, ok := ImageFromPart(mapItem); ok {
+						images = append(images, img)
+						textParts = append(textParts, "[Image attached]")
 					}
+				} else if s, ok := item.(string); ok && s != "" {
+					textParts = append(textParts, s)
 				}
 			}
 			contentStr = strings.Join(textParts, " ")

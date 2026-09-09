@@ -70,10 +70,16 @@ func TestDecodeDataURL(t *testing.T) {
 		t.Error("DecodeDataURL should fail for non-data URL")
 	}
 
-	// Invalid: no base64
-	_, _, err = DecodeDataURL("data:text/plain,hello")
-	if err == nil {
-		t.Error("DecodeDataURL should fail for non-base64 data URL")
+	// Non-base64 data URL: percent-decoded per upstream parity
+	data, mime, err = DecodeDataURL("data:text/plain,hello%20world")
+	if err != nil {
+		t.Fatalf("DecodeDataURL non-base64: unexpected error: %v", err)
+	}
+	if string(data) != "hello world" {
+		t.Errorf("DecodeDataURL non-base64 data = %q, want %q", string(data), "hello world")
+	}
+	if mime != "text/plain" {
+		t.Errorf("DecodeDataURL non-base64 mime = %q, want %q", mime, "text/plain")
 	}
 }
 
@@ -142,6 +148,79 @@ func TestImageFromPartInputImage(t *testing.T) {
 	}
 	if string(img.Data) != "Hello" {
 		t.Errorf("ImageFromPart data = %q, want %q", string(img.Data), "Hello")
+	}
+}
+
+func TestImageFromPartStringForm(t *testing.T) {
+	// Upstream parity: image_url may be a plain string, not just {url:...}.
+	part := map[string]any{
+		"type":      "image_url",
+		"image_url": "https://example.com/photo.png",
+	}
+	img, ok := ImageFromPart(part)
+	if !ok {
+		t.Fatal("ImageFromPart should succeed for string image_url")
+	}
+	if img.URL != "https://example.com/photo.png" {
+		t.Errorf("ImageFromPart URL = %q, want %q", img.URL, "https://example.com/photo.png")
+	}
+}
+
+func TestImageFromPartMimeTypeKey(t *testing.T) {
+	// Upstream parity: mime_type / media_type keys.
+	part := map[string]any{
+		"type":      "input_image",
+		"data":      "SGVsbG8=",
+		"mime_type": "image/jpeg",
+	}
+	img, ok := ImageFromPart(part)
+	if !ok {
+		t.Fatal("ImageFromPart should succeed for mime_type key")
+	}
+	if img.MIME != "image/jpeg" {
+		t.Errorf("ImageFromPart MIME = %q, want %q", img.MIME, "image/jpeg")
+	}
+}
+
+func TestResponsesInputPreservesImages(t *testing.T) {
+	// Fatal fix: image parts must survive as structured content,
+	// not flattened to a placeholder string.
+	input := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "see this"},
+				map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": "https://example.com/a.png"},
+				},
+			},
+		},
+	}
+	messages, err := ResponsesInputToMessages(input, "")
+	if err != nil {
+		t.Fatalf("ResponsesInputToMessages error: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d", len(messages))
+	}
+	content, ok := messages[0]["content"].([]any)
+	if !ok {
+		t.Fatalf("content should stay []any, got %T", messages[0]["content"])
+	}
+	chatReq := models.OpenAIChatRequest{
+		Messages:   []models.OpenAIMessage{{Role: "user", Content: content}},
+		ToolChoice: "auto",
+	}
+	prompt, images, err := MessagesToPrompt(chatReq)
+	if err != nil {
+		t.Fatalf("MessagesToPrompt error: %v", err)
+	}
+	if len(images) != 1 {
+		t.Fatalf("Expected 1 extracted image, got %d", len(images))
+	}
+	if !strings.Contains(prompt, "[Image attached]") {
+		t.Errorf("Prompt should contain [Image attached], got %q", prompt)
 	}
 }
 

@@ -94,7 +94,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		fileRefs, err = a.uploadImages(images)
 		if err != nil {
 			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("image upload failed: %v", err)}})
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 			return
 		}
 	}
@@ -128,26 +128,46 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 
 		seqNum := 0
-
-		// Build initial empty response for response.created
-		createdResp := map[string]any{
-			"id":            rid,
-			"object":        "response",
-			"status":        "in_progress",
-			"model":         resolved.Name,
-			"output":        []any{},
-			"sequence_number": seqNum,
+		emit := func(eventType string, fields map[string]any) {
+			seqNum++
+			event := map[string]any{
+				"type":            eventType,
+				"sequence_number": seqNum,
+			}
+			for k, v := range fields {
+				event[k] = v
+			}
+			_ = writeSSEEvent(w, eventType, event)
 		}
-		_ = writeSSEEvent(w, "response.created", map[string]any{
-			"type":     "response.created",
-			"response": createdResp,
-		})
-		seqNum++
 
-		// response.in_progress
-		_ = writeSSEEvent(w, "response.in_progress", map[string]any{
-			"type":     "response.in_progress",
-			"response": createdResp,
+		usage := map[string]any{
+			"input_tokens":  promptTokens,
+			"output_tokens": outputTokens,
+			"total_tokens":  promptTokens + outputTokens,
+		}
+		baseResp := map[string]any{
+			"id":         rid,
+			"object":     "response",
+			"created_at": time.Now().Unix(),
+			"model":      resolved.Name,
+		}
+		withStatus := func(status string, output any, use map[string]any) map[string]any {
+			r := map[string]any{
+				"id":         baseResp["id"],
+				"object":     baseResp["object"],
+				"created_at": baseResp["created_at"],
+				"model":      baseResp["model"],
+				"status":     status,
+				"output":     output,
+				"usage":      use,
+			}
+			return r
+		}
+		emit("response.created", map[string]any{
+			"response": withStatus("in_progress", []any{}, nil),
+		})
+		emit("response.in_progress", map[string]any{
+			"response": withStatus("in_progress", []any{}, nil),
 		})
 
 		for itemIdx, item := range outputItems {
@@ -155,122 +175,95 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			itemID, _ := item["id"].(string)
 
 			if iType == "function_call" {
-				// output_item.added (function_call)
-				_ = writeSSEEvent(w, "response.output_item.added", map[string]any{
-					"type":          "response.output_item.added",
-					"output_index":  itemIdx,
-					"item":          item,
-					"sequence_number": seqNum,
-				})
-				seqNum++
-
-				// function_call_arguments.delta
-				args, _ := item["arguments"].(string)
-				_ = writeSSEEvent(w, "response.function_call_arguments.delta", map[string]any{
-					"type":      "response.function_call_arguments.delta",
-					"item_id":   itemID,
-					"call_id":   item["call_id"],
-					"delta":     args,
-					"sequence_number": seqNum,
-				})
-				seqNum++
-
-				// function_call_arguments.done
-				_ = writeSSEEvent(w, "response.function_call_arguments.done", map[string]any{
-					"type":      "response.function_call_arguments.done",
-					"item_id":   itemID,
+				pending := map[string]any{
+					"type":      "function_call",
+					"id":        item["id"],
 					"call_id":   item["call_id"],
 					"name":      item["name"],
-					"arguments": args,
-					"sequence_number": seqNum,
+					"arguments": "",
+					"status":    "in_progress",
+				}
+				emit("response.output_item.added", map[string]any{
+					"output_index": itemIdx,
+					"item":         pending,
 				})
-				seqNum++
 
-				// output_item.done (function_call)
-				_ = writeSSEEvent(w, "response.output_item.done", map[string]any{
-					"type":          "response.output_item.done",
-					"output_index":  itemIdx,
-					"item":          item,
-					"sequence_number": seqNum,
+				args, _ := item["arguments"].(string)
+				emit("response.function_call_arguments.delta", map[string]any{
+					"item_id":      itemID,
+					"output_index": itemIdx,
+					"delta":        args,
 				})
-				seqNum++
-
+				emit("response.function_call_arguments.done", map[string]any{
+					"item_id":      itemID,
+					"output_index": itemIdx,
+					"arguments":    args,
+				})
+				emit("response.output_item.done", map[string]any{
+					"output_index": itemIdx,
+					"item":         item,
+				})
 			} else if iType == "message" {
+				pending := map[string]any{
+					"type":    "message",
+					"id":      item["id"],
+					"role":    "assistant",
+					"status":  "in_progress",
+					"content": []any{},
+				}
+				emit("response.output_item.added", map[string]any{
+					"output_index": itemIdx,
+					"item":         pending,
+				})
+
 				if content, ok := item["content"].([]map[string]any); ok {
 					for ci, cp := range content {
-						// content_part.added
-						_ = writeSSEEvent(w, "response.content_part.added", map[string]any{
-							"type":           "response.content_part.added",
-							"output_index":   itemIdx,
-							"content_index":  ci,
-							"part":           cp,
-							"sequence_number": seqNum,
+						eventFields := map[string]any{
+							"item_id":       itemID,
+							"output_index":  itemIdx,
+							"content_index": ci,
+						}
+						emit("response.content_part.added", map[string]any{
+							"item_id":       eventFields["item_id"],
+							"output_index":  eventFields["output_index"],
+							"content_index": eventFields["content_index"],
+							"part": map[string]any{
+								"type":        "output_text",
+								"text":        "",
+								"annotations": []any{},
+							},
 						})
-						seqNum++
-
-						// output_text.delta
-						text, _ := cp["text"].(string)
-						_ = writeSSEEvent(w, "response.output_text.delta", map[string]any{
-							"type":           "response.output_text.delta",
-							"item_id":        itemID,
-							"output_index":   itemIdx,
-							"content_index":  ci,
-							"delta":          text,
-							"sequence_number": seqNum,
+						cpText, _ := cp["text"].(string)
+						emit("response.output_text.delta", map[string]any{
+							"item_id":       eventFields["item_id"],
+							"output_index":  eventFields["output_index"],
+							"content_index": eventFields["content_index"],
+							"delta":         cpText,
 						})
-						seqNum++
-
-						// output_text.done
-						_ = writeSSEEvent(w, "response.output_text.done", map[string]any{
-							"type":           "response.output_text.done",
-							"item_id":        itemID,
-							"output_index":   itemIdx,
-							"content_index":  ci,
-							"text":           text,
-							"sequence_number": seqNum,
+						emit("response.output_text.done", map[string]any{
+							"item_id":       eventFields["item_id"],
+							"output_index":  eventFields["output_index"],
+							"content_index": eventFields["content_index"],
+							"text":          cpText,
 						})
-						seqNum++
-
-						// content_part.done
-						_ = writeSSEEvent(w, "response.content_part.done", map[string]any{
-							"type":           "response.content_part.done",
-							"output_index":   itemIdx,
-							"content_index":  ci,
-							"part":           cp,
-							"sequence_number": seqNum,
+						emit("response.content_part.done", map[string]any{
+							"item_id":       eventFields["item_id"],
+							"output_index":  eventFields["output_index"],
+							"content_index": eventFields["content_index"],
+							"part":          cp,
 						})
-						seqNum++
 					}
 				}
 
-				// output_item.done (message)
-				_ = writeSSEEvent(w, "response.output_item.done", map[string]any{
-					"type":          "response.output_item.done",
-					"output_index":  itemIdx,
-					"item":          item,
-					"sequence_number": seqNum,
+				emit("response.output_item.done", map[string]any{
+					"output_index": itemIdx,
+					"item":         item,
 				})
-				seqNum++
 			}
 		}
 
-		// response.completed
-		respObj := map[string]any{
-			"id":               rid,
-			"object":           "response",
-			"status":           "completed",
-			"model":            resolved.Name,
-			"output":           outputItems,
-			"sequence_number":  seqNum,
-			"usage": map[string]any{
-				"input_tokens":  promptTokens,
-				"output_tokens": outputTokens,
-				"total_tokens":  promptTokens + outputTokens,
-			},
-		}
-		_ = writeSSEEvent(w, "response.completed", map[string]any{
-			"type":     "response.completed",
-			"response": respObj,
+		emit("response.completed", map[string]any{
+			"response": withStatus("completed", outputItems, usage),
 		})
 	} else {
 		writeJSON(w, http.StatusOK, map[string]any{

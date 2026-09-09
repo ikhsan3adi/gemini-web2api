@@ -52,7 +52,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		fileRefs, err = a.uploadImages(images)
 		if err != nil {
 			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("image upload failed: %v", err)}})
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 			return
 		}
 	}

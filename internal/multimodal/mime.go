@@ -2,7 +2,6 @@ package multimodal
 
 import (
 	"encoding/base64"
-	"net/http"
 )
 
 // DecodeBase64Raw decodes a base64 string (standard or URL-safe) into bytes.
@@ -76,5 +75,6 @@ func DetectImageMime(data []byte) string {
 		return "image/png" // fallback for unknown ftyp
 	}
 
-	return http.DetectContentType(data)
+	// Upstream parity: unknown signatures fall back to image/png.
+	return "image/png"
 }
