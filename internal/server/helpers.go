@@ -8,8 +8,16 @@ import (
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
+	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
+
+func setModelHeaders(w http.ResponseWriter, resolved models.Resolved) {
+	w.Header().Set("X-Resolved-Model", resolved.Name)
+	if resolved.Fallback {
+		w.Header().Set("X-Model-Fallback", "true")
+	}
+}
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")

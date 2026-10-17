@@ -11,17 +11,41 @@ import (
 // Mode corresponds to the Gemini upstream mode ID, Think specifies the default reasoning depth,
 // and Extra contains index-based overrides for Gemini's sparse RPC request array.
 type Model struct {
-	Mode  int         `json:"mode"`
-	Think int         `json:"think"`
-	Desc  string      `json:"desc"`
-	Extra map[int]any `json:"extra,omitempty"`
+	Mode   int         `json:"mode"`
+	Think  int         `json:"think"`
+	Desc   string      `json:"desc"`
+	Header string      `json:"header,omitempty"`
+	Extra  map[int]any `json:"extra,omitempty"`
 }
 
 var MODELS = map[string]Model{
+	"gemini-4-argon": {
+		Mode:   8,
+		Think:  4,
+		Header: "95a4c0abcba24364",
+		Desc:   "Frontier model for complex tasks (Gemini 4 Argon, requires Google AI Pro cookie)",
+	},
+	"argon": {
+		Mode:   8,
+		Think:  4,
+		Header: "95a4c0abcba24364",
+		Desc:   "Alias for gemini-4-argon",
+	},
+	"gemini-4": {
+		Mode:   8,
+		Think:  4,
+		Header: "95a4c0abcba24364",
+		Desc:   "Alias for gemini-4-argon",
+	},
+	"gemini-3.8-flash": {
+		Mode:  1,
+		Think: 4,
+		Desc:  "Latest all-around model (Gemini 3.8 Flash)",
+	},
 	"gemini-3.7-flash": {
 		Mode:  1,
 		Think: 4,
-		Desc:  "Latest all-around model (Gemini 3.7 Flash)",
+		Desc:  "All-around model (Gemini 3.7 Flash)",
 	},
 	"gemini-3.6-flash": {
 		Mode:  1,
@@ -67,10 +91,12 @@ var MODELS = map[string]Model{
 }
 
 type Resolved struct {
-	Name  string
-	Mode  int
-	Think int
-	Extra map[int]any
+	Name     string
+	Mode     int
+	Think    int
+	Header   string
+	Fallback bool
+	Extra    map[int]any
 }
 
 const DefaultModelName = "gemini-3.6-flash"
@@ -95,10 +121,12 @@ func Resolve(modelName, defaultName string) (Resolved, error) {
 	}
 
 	cfg, exists := MODELS[modelName]
+	fallback := false
 	if !exists {
 		log.Printf("Unknown model '%s', falling back to '%s'", modelName, defaultName)
 		modelName = defaultName
 		cfg = MODELS[defaultName]
+		fallback = true
 	}
 
 	thinkMode := cfg.Think
@@ -107,9 +135,11 @@ func Resolve(modelName, defaultName string) (Resolved, error) {
 	}
 
 	return Resolved{
-		Name:  modelName,
-		Mode:  cfg.Mode,
-		Think: thinkMode,
-		Extra: cfg.Extra,
+		Name:     modelName,
+		Mode:     cfg.Mode,
+		Think:    thinkMode,
+		Header:   cfg.Header,
+		Fallback: fallback,
+		Extra:    cfg.Extra,
 	}, nil
 }

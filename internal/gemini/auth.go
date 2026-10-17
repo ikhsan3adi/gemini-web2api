@@ -13,8 +13,11 @@ import (
 )
 
 type CookieInfo struct {
-	Cookie  string
-	SAPISID string
+	Cookie    string
+	SAPISID   string
+	AuthUser  string
+	XSRFToken string
+	GeminiBL  string
 }
 
 type CookieCache struct {
@@ -58,18 +61,39 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 	content := strings.TrimSpace(string(contentBytes))
 	var cookieStr string
 	var sapisid string
+	var authUser string
+	var xsrfToken string
+	var geminiBL string
 
 	if strings.HasPrefix(content, "{") {
 		var data struct {
-			Cookie  string `json:"cookie"`
-			SAPISID string `json:"sapisid"`
+			Cookie    string          `json:"cookie"`
+			SAPISID   string          `json:"sapisid"`
+			AuthUser  json.RawMessage `json:"auth_user"`
+			XSRFToken *string         `json:"xsrf_token"`
+			GeminiBL  *string         `json:"gemini_bl"`
 		}
 		if err := json.Unmarshal([]byte(content), &data); err == nil {
 			cookieStr = data.Cookie
 			sapisid = data.SAPISID
+			if len(data.AuthUser) > 0 {
+				u := strings.Trim(strings.TrimSpace(string(data.AuthUser)), `"`)
+				if u != "null" {
+					authUser = u
+				}
+			}
+			if data.XSRFToken != nil {
+				xsrfToken = *data.XSRFToken
+			}
+			if data.GeminiBL != nil {
+				geminiBL = *data.GeminiBL
+			}
 		}
 	} else {
 		cookieStr = content
+	}
+
+	if sapisid == "" && cookieStr != "" {
 		pairs := strings.Split(cookieStr, "; ")
 		for _, pair := range pairs {
 			parts := strings.SplitN(pair, "=", 2)
@@ -82,8 +106,11 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 
 	c.mtime = stat.ModTime()
 	c.info = CookieInfo{
-		Cookie:  cookieStr,
-		SAPISID: sapisid,
+		Cookie:    cookieStr,
+		SAPISID:   sapisid,
+		AuthUser:  authUser,
+		XSRFToken: xsrfToken,
+		GeminiBL:  geminiBL,
 	}
 
 	return c.info, nil

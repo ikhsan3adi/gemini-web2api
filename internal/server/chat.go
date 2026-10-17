@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -35,6 +36,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	setModelHeaders(w, resolved)
 
 	if req.ToolChoice == nil {
 		req.ToolChoice = "auto"
@@ -55,6 +57,14 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 			return
 		}
+	}
+
+	gemOpt := gemini.ModelOptions{
+		ModelName:   resolved.Name,
+		ModelID:     resolved.Mode,
+		ThinkMode:   resolved.Think,
+		ModelHeader: resolved.Header,
+		Extra:       resolved.Extra,
 	}
 
 	cid := fmt.Sprintf("chatcmpl-%s", format.RandHex(12))
@@ -85,7 +95,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = writeSSEData(w, firstChunk)
 
-		emitErr := a.Gem.GenerateStream(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra, func(delta string) error {
+		emitErr := a.Gem.GenerateStream(prompt, gemOpt, fileRefs, func(delta string) error {
 			chunk := models.OpenAIChatResponse{
 				ID:      cid,
 				Object:  "chat.completion.chunk",
@@ -127,7 +137,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text, err := a.Gem.Generate(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra)
+	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return

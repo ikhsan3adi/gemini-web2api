@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -53,6 +54,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	setModelHeaders(w, resolved)
 
 	fcMode := "AUTO"
 	if req.ToolConfig != nil && req.ToolConfig.FunctionCallingConfig != nil && req.ToolConfig.FunctionCallingConfig.Mode != "" {
@@ -75,13 +77,21 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(prompt), len(fileRefs))
 
+	gemOpt := gemini.ModelOptions{
+		ModelName:   resolved.Name,
+		ModelID:     resolved.Mode,
+		ThinkMode:   resolved.Think,
+		ModelHeader: resolved.Header,
+		Extra:       resolved.Extra,
+	}
+
 	if stream && !hasTools {
 		if !startSSE(w) {
 			return
 		}
 
 		var fullText string
-		emitErr := a.Gem.GenerateStream(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra, func(delta string) error {
+		emitErr := a.Gem.GenerateStream(prompt, gemOpt, fileRefs, func(delta string) error {
 			if delta == "" {
 				return nil
 			}
@@ -127,7 +137,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text, err := a.Gem.Generate(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra)
+	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
