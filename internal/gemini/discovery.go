@@ -132,7 +132,7 @@ func (c *Client) DiscoverModels() ([]DiscoveredModel, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -293,7 +293,7 @@ func (c *Client) resolveModelHeader(opt ModelOptions, reqUUID string) (string, i
 		}
 	}
 
-	targetID := ""
+	targetID := opt.ModelHeader
 	targetNum := opt.ModelID
 	if target != nil {
 		targetID = target.ID
@@ -302,17 +302,9 @@ func (c *Client) resolveModelHeader(opt ModelOptions, reqUUID string) (string, i
 			capVal = target.Capacity
 			capFld = target.CapacityFld
 		}
-	} else {
-		targetID = opt.ModelHeader
-		targetNum = opt.ModelID
-		if capVal <= 0 {
-			capVal = 2
-			capFld = 12
-		}
-	}
-
-	if targetID == "" {
-		return "", targetNum
+	} else if capVal <= 0 {
+		capVal = 2
+		capFld = 12
 	}
 
 	if capVal <= 0 {

@@ -43,7 +43,7 @@ func CompressIfNeeded(b64 string, maxSize int) (string, error) {
 
 	ratio := math.Min(float64(MaxImageDimension)/float64(width), float64(MaxImageDimension)/float64(height))
 
-	var dstImg image.Image = img
+	dstImg := img
 	if ratio < 1.0 {
 		newWidth := int(float64(width) * ratio)
 		newHeight := int(float64(height) * ratio)

@@ -84,7 +84,7 @@ func (c *TokenCache) fetchPageTokens() PageTokens {
 		log.Printf("Page token fetch failed: %v", err)
 		return tokens
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {

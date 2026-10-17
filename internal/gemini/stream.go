@@ -25,7 +25,7 @@ func (p *StreamParser) Feed(chunk string) ([]string, error) {
 
 	if strings.Contains(p.buf, "BardErrorInfo") {
 		if code, ok := IsBardError(p.buf); ok {
-			return nil, fmt.Errorf("Gemini upstream rejected request: BardErrorInfo [%s]", code)
+			return nil, fmt.Errorf("gemini upstream rejected request: BardErrorInfo [%s]", code)
 		}
 	}
 
@@ -45,7 +45,7 @@ func (p *StreamParser) Feed(chunk string) ([]string, error) {
 			// If the new text doesn't start with the previously processed text, it means
 			// the server sent a completely different text blob, breaking the delta continuation assumption.
 			if !strings.HasPrefix(t, p.prevText) {
-				return nil, errors.New("Gemini stream content changed during retry")
+				return nil, errors.New("gemini stream content changed during retry")
 			}
 
 			delta := CleanText(t[len(p.prevText):], false)

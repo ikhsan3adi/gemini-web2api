@@ -184,7 +184,8 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			iType, _ := item["type"].(string)
 			itemID, _ := item["id"].(string)
 
-			if iType == "function_call" {
+			switch iType {
+			case "function_call":
 				pending := map[string]any{
 					"type":      "function_call",
 					"id":        item["id"],
@@ -213,7 +214,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 					"output_index": itemIdx,
 					"item":         item,
 				})
-			} else if iType == "message" {
+			case "message":
 				pending := map[string]any{
 					"type":    "message",
 					"id":      item["id"],

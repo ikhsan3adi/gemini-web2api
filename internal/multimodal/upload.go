@@ -56,16 +56,16 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 
 	resp1, err := client.Do(req1)
 	if err != nil {
-		return "", fmt.Errorf("Upload step 1 failed: %w", err)
+		return "", fmt.Errorf("upload step 1 failed: %w", err)
 	}
-	defer resp1.Body.Close()
+	defer func() { _ = resp1.Body.Close() }()
 
 	uploadURL := resp1.Header.Get("X-Goog-Upload-URL")
 	if uploadURL == "" {
 		uploadURL = resp1.Header.Get("x-goog-upload-url")
 	}
 	if uploadURL == "" {
-		return "", fmt.Errorf("No upload URL in response headers")
+		return "", fmt.Errorf("no upload URL in response headers")
 	}
 
 	// Step 2: Upload file data + finalize
@@ -83,9 +83,9 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 
 	resp2, err := client.Do(req2)
 	if err != nil {
-		return "", fmt.Errorf("Upload step 2 failed: %w", err)
+		return "", fmt.Errorf("upload step 2 failed: %w", err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	bodyBytes, err := io.ReadAll(resp2.Body)
 	if err != nil {
@@ -94,7 +94,7 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 
 	fileRef := strings.TrimSpace(string(bodyBytes))
 	if fileRef == "" || !strings.HasPrefix(fileRef, "/") {
-		return "", fmt.Errorf("Invalid file reference: %s", fileRef)
+		return "", fmt.Errorf("invalid file reference: %s", fileRef)
 	}
 
 	return fileRef, nil
@@ -118,7 +118,7 @@ func FetchImageBytes(client gemini.Requester, imageURL string) ([]byte, error) {
 		log.Printf("Image fetch failed: %v", err)
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	return io.ReadAll(resp.Body)
 }

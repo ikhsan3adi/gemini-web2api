@@ -115,7 +115,7 @@ func Resolve(modelName, defaultName string) (Resolved, error) {
 		modelName = modelName[:idx]
 		val, err := strconv.Atoi(thinkStr)
 		if err != nil {
-			return Resolved{}, fmt.Errorf("Invalid think level: %s", thinkStr)
+			return Resolved{}, fmt.Errorf("invalid think level: %s", thinkStr)
 		}
 		thinkOverride = &val
 	}

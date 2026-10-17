@@ -69,11 +69,9 @@ func BuildBody(prompt string, modelID, thinkMode int, fileRefs []string, extra m
 	inner[68] = 1
 	inner[79] = modelID
 
-	if extra != nil {
-		for k, v := range extra {
-			if k >= 0 && k < len(inner) {
-				inner[k] = v
-			}
+	for k, v := range extra {
+		if k >= 0 && k < len(inner) {
+			inner[k] = v
 		}
 	}
 
