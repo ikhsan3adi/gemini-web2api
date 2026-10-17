@@ -84,7 +84,7 @@ func IsBardError(raw string) (string, bool) {
 
 func ExtractResponseText(raw string) (string, error) {
 	if code, ok := IsBardError(raw); ok {
-		return "", fmt.Errorf("Gemini upstream rejected request: BardErrorInfo [%s]", code)
+		return "", fmt.Errorf("gemini upstream rejected request: BardErrorInfo [%s]", code)
 	}
 
 	var lastText string

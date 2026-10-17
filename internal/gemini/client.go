@@ -28,6 +28,14 @@ type Requester interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
+type ModelOptions struct {
+	ModelName   string
+	ModelID     int
+	ThinkMode   int
+	ModelHeader string
+	Extra       map[int]any
+}
+
 type Client struct {
 	Cfg     config.Config
 	HTTP    Requester
@@ -35,6 +43,13 @@ type Client struct {
 	Logf    func(format string, args ...any)
 	blMu    sync.Mutex
 	bl      string
+
+	modelsMu      sync.RWMutex
+	discovered    []DiscoveredModel
+	accountCap    int
+	accountCapFld int
+	discMu        sync.Mutex
+	lastDiscFail  time.Time
 }
 
 func NewClient(cfg config.Config) *Client {
@@ -121,7 +136,13 @@ func (c *Client) UpdateBLIfNeeded() (string, bool, error) {
 }
 
 func (c *Client) buildHeaders() http.Header {
-	prefix := AccountPrefix(c.Cfg.AuthUser)
+	cookieInfo, _ := c.Cookies.Load()
+	authUser := c.Cfg.AuthUser
+	if authUser == "" && cookieInfo.AuthUser != "" {
+		authUser = cookieInfo.AuthUser
+	}
+
+	prefix := AccountPrefix(authUser)
 	h := make(http.Header)
 	h.Set("Content-Type", "application/x-www-form-urlencoded")
 	h.Set("Origin", "https://gemini.google.com")
@@ -129,11 +150,10 @@ func (c *Client) buildHeaders() http.Header {
 	h.Set("X-Same-Domain", "1")
 	h.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	if prefix != "" && c.Cfg.AuthUser != "" {
-		h.Set("X-Goog-AuthUser", c.Cfg.AuthUser)
+	if prefix != "" && authUser != "" {
+		h.Set("X-Goog-AuthUser", authUser)
 	}
 
-	cookieInfo, _ := c.Cookies.Load()
 	if cookieInfo.Cookie != "" {
 		h.Set("Cookie", cookieInfo.Cookie)
 	}
@@ -176,13 +196,39 @@ func (c *Client) triageStatus(resp *http.Response) error {
 	return nil
 }
 
-func (c *Client) Generate(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any) (string, error) {
-	bodyStr := BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
-	reqURL := BuildURL(c.Cfg, c.CurrentBL())
-	headers := c.buildHeaders()
-	blRefreshed := false
+func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (string, error) {
+	c.EnsureModelsDiscovered()
 
+	cookieInfo, _ := c.Cookies.Load()
+	cfg := c.Cfg
+	if cfg.XSRFToken == "" && cookieInfo.XSRFToken != "" {
+		cfg.XSRFToken = cookieInfo.XSRFToken
+	}
+	if cfg.AuthUser == "" && cookieInfo.AuthUser != "" {
+		cfg.AuthUser = cookieInfo.AuthUser
+	}
+
+	reqUUID := strings.ToUpper(uuidV4())
+	extra := make(map[int]any, len(opt.Extra)+1)
+	for k, v := range opt.Extra {
+		extra[k] = v
+	}
+	extra[59] = reqUUID
+
+	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
+	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	reqURL := BuildURL(cfg, c.CurrentBL())
+	headers := c.buildHeaders()
+	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
+	if modelHdr != "" {
+		headers.Set(ModelHeaderKey, modelHdr)
+		headers.Set(HeaderJspb89, "[0]")
+		headers.Set(HeaderJspb90, "[0,0,0]")
+	}
+
+	blRefreshed := false
 	var lastErr error
+
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
@@ -201,8 +247,8 @@ func (c *Client) Generate(prompt string, modelID, thinkMode int, fileRefs []stri
 					blRefreshed = true
 					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
 						c.Logf("BL auto-updated, retrying request")
-						bodyStr = BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
-						reqURL = BuildURL(c.Cfg, c.CurrentBL())
+						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+						reqURL = BuildURL(cfg, c.CurrentBL())
 						attempt-- // retry without consuming an attempt
 						continue
 					}
@@ -233,18 +279,41 @@ func (c *Client) Generate(prompt string, modelID, thinkMode int, fileRefs []stri
 	return "", lastErr
 }
 
-func (c *Client) GenerateStream(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any, emit func(string) error) error {
-	bodyStr := BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
-	reqURL := BuildURL(c.Cfg, c.CurrentBL())
-	headers := c.buildHeaders()
-	blRefreshed := false
+func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []string, emit func(string) error) error {
+	c.EnsureModelsDiscovered()
 
+	cookieInfo, _ := c.Cookies.Load()
+	cfg := c.Cfg
+	if cfg.XSRFToken == "" && cookieInfo.XSRFToken != "" {
+		cfg.XSRFToken = cookieInfo.XSRFToken
+	}
+	if cfg.AuthUser == "" && cookieInfo.AuthUser != "" {
+		cfg.AuthUser = cookieInfo.AuthUser
+	}
+
+	reqUUID := strings.ToUpper(uuidV4())
+	extra := make(map[int]any, len(opt.Extra)+1)
+	for k, v := range opt.Extra {
+		extra[k] = v
+	}
+	extra[59] = reqUUID
+
+	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
+	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	reqURL := BuildURL(cfg, c.CurrentBL())
+	headers := c.buildHeaders()
+	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
+	if modelHdr != "" {
+		headers.Set(ModelHeaderKey, modelHdr)
+		headers.Set(HeaderJspb89, "[0]")
+		headers.Set(HeaderJspb90, "[0,0,0]")
+	}
+
+	blRefreshed := false
 	parser := NewStreamParser()
 	var lastErr error
 
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
-		// Reset the chunk buffer on each retry, but preserve the prevText state.
-		// This ensures we don't emit duplicate deltas to the client if a stream connection drops halfway.
 		parser.ResetBuffer()
 
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
@@ -264,8 +333,8 @@ func (c *Client) GenerateStream(prompt string, modelID, thinkMode int, fileRefs 
 					blRefreshed = true
 					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
 						c.Logf("BL auto-updated, retrying stream request")
-						bodyStr = BuildBody(prompt, modelID, thinkMode, fileRefs, extra, c.Cfg)
-						reqURL = BuildURL(c.Cfg, c.CurrentBL())
+						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+						reqURL = BuildURL(cfg, c.CurrentBL())
 						attempt-- // retry without consuming an attempt
 						continue
 					}

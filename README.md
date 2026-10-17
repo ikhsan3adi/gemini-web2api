@@ -171,35 +171,49 @@ Supports Google native API endpoints:
 
 ## Available Models
 
-| Model                            | Description                         | Output         |
-| -------------------------------- | ----------------------------------- | -------------- |
-| `gemini-3.6-flash`               | All-around model (latest)           | ~12k chars     |
-| `gemini-3.5-flash`               | Alias for gemini-3.6-flash          | ~12k chars     |
-| `gemini-3.5-flash-thinking`      | Extended thinking, longest output   | **~20k chars** |
-| `gemini-3.5-flash-thinking-lite` | Adaptive thinking depth             | ~15k chars     |
-| `gemini-3.1-pro`                 | Advanced math & code (needs cookie) | ~12k chars     |
-| `gemini-auto`                    | Auto model selection                | varies         |
-| `gemini-flash-lite`              | Fastest answers, lightweight        | ~10k chars     |
+| Model                            | Description                                  | Output          |
+| -------------------------------- | -------------------------------------------- | --------------- |
+| `gemini-4-argon`                 | Frontier model for complex tasks (needs Pro) | **~20k+ chars** |
+| `argon`, `gemini-4`              | Aliases for gemini-4-argon                   | **~20k+ chars** |
+| `gemini-3.8-flash`               | Latest all-around model (Gemini 3.8 Flash)   | ~12k chars      |
+| `gemini-3.7-flash`               | All-around model (Gemini 3.7 Flash)          | ~12k chars      |
+| `gemini-3.6-flash`               | All-around model (Gemini 3.6 Flash)          | ~12k chars      |
+| `gemini-3.5-flash`               | Alias for gemini-3.6-flash                   | ~12k chars      |
+| `gemini-3.5-flash-thinking`      | Extended thinking, longest output            | **~20k chars**  |
+| `gemini-3.5-flash-thinking-lite` | Adaptive thinking depth                      | ~15k chars      |
+| `gemini-3.1-pro`                 | Advanced math & code (needs Pro cookie)      | ~12k chars      |
+| `gemini-auto`                    | Auto model selection                         | varies          |
+| `gemini-flash-lite`              | Fastest answers, lightweight                 | ~10k chars      |
 
 ### Thinking Depth
 
-Append `@think=N` to any model name to control reasoning logic:
+Append `@think=N` to any model name to control reasoning logic (corresponds to the web UI Thinking level submenu):
 
 ```text
-gemini-3.5-flash-thinking@think=0   # deepest (default for thinking model)
-gemini-3.5-flash-thinking@think=2   # medium
-gemini-3.5-flash-thinking@think=4   # shallowest
+gemini-4-argon@think=0              # High (deepest reasoning, default for thinking models)
+gemini-4-argon@think=2              # Medium
+gemini-4-argon@think=4              # Low (default for standard models)
 ```
+
+### Model Inspection Headers
+
+Every API response (both JSON and streaming SSE) includes HTTP response headers indicating actual model routing:
+- `X-Resolved-Model`: The backend model identifier actually routed to (e.g. `gemini-4-argon`).
+- `X-Model-Fallback: true`: Included whenever an unmapped model was requested and fell back to the default model.
 
 ## Advanced Features (Go Exclusive)
 
-### 1. Vision / Multimodal Uploads
+### 1. Dynamic Model Discovery & Upstream Routing Headers
+
+When authenticated with account cookies, the proxy dynamically queries Gemini's `otAQ7b` RPC during startup to discover available models and account tier capacity. It attaches the required upstream routing headers (`x-goog-ext-525001261-jspb`) matching web application behavior, allowing models like Gemini 4 Argon to route properly.
+
+### 2. Vision / Multimodal Uploads
 
 Unlike the Python version which ignores images, this Go port actively intercepts `image_url` payloads (both base64 encoded and external HTTP URLs).
 It initiates a background Scotty Resumable Upload session, converts the base64 image into Google internal WIZ blobs, and passes the WIZ image references directly to Gemini.
 Just send OpenAI standard multimodal payloads and it will work!
 
-### 2. TLS Impersonation (Bypass WAF)
+### 3. TLS Impersonation (Bypass WAF)
 
 If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks the IP with a 403 Forbidden, you can impersonate a real browser's TLS signature:
 
@@ -209,12 +223,12 @@ If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks 
 
 Or in `config.json`: `"impersonate": "chrome_120"`. Supported profiles include `chrome_112` to `chrome_130`, `edge`, and `safari`.
 
-## Optional: Cookie for Pro
+## Optional: Cookie for Pro and Argon
 
-Anonymous access works for all models, but `gemini-3.1-pro` routes to Flash without authentication. To get real Pro routing, you need a **Gemini Advanced (paid subscription)** account cookie:
+Anonymous access works for Flash models, but `gemini-4-argon` and `gemini-3.1-pro` require an authenticated **Google AI Pro / Advanced** account session. Without authentication, upstream routes requests to Flash.
 
 ```bash
-./gemini-web2api --cookie-file cookie.txt
+./gemini-web2api --cookie-file gemini-auth.json
 ```
 
 ### How to get cookies

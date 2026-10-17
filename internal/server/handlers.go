@@ -46,9 +46,9 @@ func (a *App) handleGoogleModels(w http.ResponseWriter, r *http.Request) {
 	var modelList []map[string]any
 	for name, m := range models.MODELS {
 		modelList = append(modelList, map[string]any{
-			"name":                        "models/" + name,
-			"displayName":                 name,
-			"description":                 m.Desc,
+			"name":                       "models/" + name,
+			"displayName":                name,
+			"description":                m.Desc,
 			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent"},
 		})
 	}

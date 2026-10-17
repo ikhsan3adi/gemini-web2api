@@ -6,44 +6,99 @@ import (
 
 func TestResolve(t *testing.T) {
 	tests := []struct {
-		input       string
-		defaultName string
-		wantName    string
-		wantMode    int
-		wantThink   int
-		wantErr     bool
+		input        string
+		defaultName  string
+		wantName     string
+		wantMode     int
+		wantThink    int
+		wantHeader   string
+		wantFallback bool
+		wantErr      bool
 	}{
 		{
-			input:       "gemini-3.6-flash",
-			defaultName: "gemini-3.6-flash",
-			wantName:    "gemini-3.6-flash",
-			wantMode:    1,
-			wantThink:   4,
-			wantErr:     false,
+			input:        "gemini-3.6-flash",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-3.6-flash",
+			wantMode:     1,
+			wantThink:    4,
+			wantFallback: false,
+			wantErr:      false,
 		},
 		{
-			input:       "gemini-3.5-flash-thinking",
-			defaultName: "gemini-3.6-flash",
-			wantName:    "gemini-3.5-flash-thinking",
-			wantMode:    2,
-			wantThink:   0,
-			wantErr:     false,
+			input:        "gemini-3.8-flash",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-3.8-flash",
+			wantMode:     1,
+			wantThink:    4,
+			wantFallback: false,
+			wantErr:      false,
 		},
 		{
-			input:       "gemini-3.6-flash@think=0",
-			defaultName: "gemini-3.6-flash",
-			wantName:    "gemini-3.6-flash",
-			wantMode:    1,
-			wantThink:   0,
-			wantErr:     false,
+			input:        "gemini-4-argon",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4-argon",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantErr:      false,
 		},
 		{
-			input:       "unknown-model",
-			defaultName: "gemini-3.6-flash",
-			wantName:    "gemini-3.6-flash",
-			wantMode:    1,
-			wantThink:   4,
-			wantErr:     false,
+			input:        "argon",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "argon",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "gemini-4",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "argon@think=0",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "argon",
+			wantMode:     8,
+			wantThink:    0,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "gemini-3.5-flash-thinking",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-3.5-flash-thinking",
+			wantMode:     2,
+			wantThink:    0,
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "gemini-3.6-flash@think=0",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-3.6-flash",
+			wantMode:     1,
+			wantThink:    0,
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "unknown-model",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-3.6-flash",
+			wantMode:     1,
+			wantThink:    4,
+			wantFallback: true,
+			wantErr:      false,
 		},
 		{
 			input:       "gemini-3.6-flash@think=abc",
@@ -69,6 +124,12 @@ func TestResolve(t *testing.T) {
 			}
 			if res.Think != tt.wantThink {
 				t.Errorf("res.Think = %d, want %d", res.Think, tt.wantThink)
+			}
+			if res.Header != tt.wantHeader {
+				t.Errorf("res.Header = %q, want %q", res.Header, tt.wantHeader)
+			}
+			if res.Fallback != tt.wantFallback {
+				t.Errorf("res.Fallback = %v, want %v", res.Fallback, tt.wantFallback)
 			}
 		})
 	}

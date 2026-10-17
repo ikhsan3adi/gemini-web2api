@@ -199,3 +199,37 @@ func TestResponsesSequenceNumberOrder(t *testing.T) {
 		t.Errorf("Responses endpoint rejected valid JSON, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestModelHeaders(t *testing.T) {
+	cfg := config.Default()
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	// 1. Known model: gemini-4-argon
+	bodyKnown := `{"model":"gemini-4-argon","messages":[{"role":"user","content":"hi"}]}`
+	req1 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(bodyKnown))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	if got := rec1.Header().Get("X-Resolved-Model"); got != "gemini-4-argon" {
+		t.Errorf("Expected X-Resolved-Model=gemini-4-argon, got %q", got)
+	}
+	if got := rec1.Header().Get("X-Model-Fallback"); got != "" {
+		t.Errorf("Expected X-Model-Fallback to be empty for known model, got %q", got)
+	}
+
+	// 2. Unknown model: should fallback and set X-Model-Fallback: true
+	bodyUnknown := `{"model":"gemini-9.9-fake","messages":[{"role":"user","content":"hi"}]}`
+	req2 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(bodyUnknown))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if got := rec2.Header().Get("X-Resolved-Model"); got != "gemini-3.6-flash" {
+		t.Errorf("Expected X-Resolved-Model=gemini-3.6-flash, got %q", got)
+	}
+	if got := rec2.Header().Get("X-Model-Fallback"); got != "true" {
+		t.Errorf("Expected X-Model-Fallback=true for unknown model, got %q", got)
+	}
+}

@@ -13,9 +13,9 @@ type GoogleContent struct {
 }
 
 type GooglePart struct {
-	Text             string                `json:"text,omitempty"`
-	InlineData       *GoogleInlineData     `json:"inlineData,omitempty"`
-	FunctionCall     *GoogleFunctionCall   `json:"functionCall,omitempty"`
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *GoogleInlineData       `json:"inlineData,omitempty"`
+	FunctionCall     *GoogleFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *GoogleFunctionCallResp `json:"functionResponse,omitempty"`
 }
 

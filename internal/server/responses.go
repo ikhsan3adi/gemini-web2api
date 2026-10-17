@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -35,6 +36,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	setModelHeaders(w, resolved)
 
 	inputRaw := req["input"]
 	instructions, _ := req["instructions"].(string)
@@ -99,7 +101,15 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	text, err := a.Gem.Generate(prompt, resolved.Mode, resolved.Think, fileRefs, resolved.Extra)
+	gemOpt := gemini.ModelOptions{
+		ModelName:   resolved.Name,
+		ModelID:     resolved.Mode,
+		ThinkMode:   resolved.Think,
+		ModelHeader: resolved.Header,
+		Extra:       resolved.Extra,
+	}
+
+	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
@@ -174,7 +184,8 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			iType, _ := item["type"].(string)
 			itemID, _ := item["id"].(string)
 
-			if iType == "function_call" {
+			switch iType {
+			case "function_call":
 				pending := map[string]any{
 					"type":      "function_call",
 					"id":        item["id"],
@@ -203,7 +214,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 					"output_index": itemIdx,
 					"item":         item,
 				})
-			} else if iType == "message" {
+			case "message":
 				pending := map[string]any{
 					"type":    "message",
 					"id":      item["id"],

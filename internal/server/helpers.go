@@ -7,9 +7,16 @@ import (
 	"net/http"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
-	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
+	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
+
+func setModelHeaders(w http.ResponseWriter, resolved models.Resolved) {
+	w.Header().Set("X-Resolved-Model", resolved.Name)
+	if resolved.Fallback {
+		w.Header().Set("X-Model-Fallback", "true")
+	}
+}
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -99,7 +106,7 @@ func (a *App) uploadImages(images []format.Image) ([]string, error) {
 	tokens := a.Tokens.Get()
 	var fileRefs []string
 
-	var requester gemini.Requester = a.Gem.HTTP
+	requester := a.Gem.HTTP
 	if requester == nil {
 		if a.HTTPClient != nil {
 			requester = a.HTTPClient

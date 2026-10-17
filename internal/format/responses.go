@@ -52,10 +52,11 @@ func ResponsesInputToMessages(input any, instructions string) ([]map[string]any,
 						for _, cp := range cpList {
 							if cpMap, ok := cp.(map[string]any); ok {
 								cpType, _ := cpMap["type"].(string)
-								if cpType == "output_text" {
+								switch cpType {
+								case "output_text":
 									t, _ := cpMap["text"].(string)
 									textAcc += t
-								} else if cpType == "function_call" {
+								case "function_call":
 									tcList = append(tcList, cpMap)
 								}
 							}

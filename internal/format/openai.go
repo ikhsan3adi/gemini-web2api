@@ -206,7 +206,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 	var images []Image
 
 	strChoice, isStr := req.ToolChoice.(string)
-	if !(isStr && strChoice == "none") && len(req.Tools) > 0 {
+	if (!isStr || strChoice != "none") && len(req.Tools) > 0 {
 		var toolDefs []models.OpenAIFunction
 		for _, tool := range req.Tools {
 			fn := tool.Function

@@ -81,6 +81,11 @@ func main() {
 		log.Printf("BL auto-updated: %s -> %s", cfg.GeminiBL, newBL)
 	}
 
+	app.Gem.EnsureModelsDiscovered()
+	if d := app.Gem.DiscoveredModels(); len(d) > 0 {
+		log.Printf("Discovered %d account models via otAQ7b", len(d))
+	}
+
 	modelKeys := make([]string, 0, len(models.MODELS))
 	for k := range models.MODELS {
 		modelKeys = append(modelKeys, k)
