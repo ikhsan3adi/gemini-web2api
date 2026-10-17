@@ -1,4 +1,4 @@
-<!-- markdown-translator:33daa17eca010b849e2bae7e724cf9b55271005f198bb95061d2c029733afb36 -->
+<!-- markdown-translator:62dba9eec309a74d88006d57d713a432a95bf4677b56668264e4322808769359 -->
 # Gemini-web2api
 
 <p align="center">
@@ -113,14 +113,14 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
-> **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求引起的。
+> **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
 
 ## 客户端配置
 
 ### Cherry Studio / ChatBox / 任何 OpenAI 客户端
 
-|领域|价值|
-| -------- | ---------------------------------------------------------------------------------- |
+|领域 |价值|
+| -------- | -------------------------------------------------------------------------------- |
 |基本网址 |`http://localhost:8081/v1`|
 | API 密钥 |任何`api_keys`价值来自`config.json`;如果没有配置的话，什么都可以|
 |型号|`gemini-3.5-flash-thinking`|
@@ -173,34 +173,49 @@ gemini
 ## 可用型号
 
 |型号|描述 |输出|
-| -------------------------------- | ----------------------------------- | -------------- |
-|`gemini-3.6-flash`|全能机型（最新）|约 12k 个字符 |
+| -------------------------------- | ------------------------------------------------------------------ | --------------- |
+|`gemini-4-argon`|复杂任务的前沿模型（需要 Pro）|**~20k+ 字符**|
+|`argon`,`gemini-4`| Gemini-4-argon 的别名 |**~20k+ 字符**|
+|`gemini-3.8-flash`|最新全能机型（Gemini 3.8 Flash）|约 12k 个字符 |
+|`gemini-3.7-flash`|全能机型（Gemini 3.7 Flash）|约 12k 个字符 |
+|`gemini-3.6-flash`|全能机型（Gemini 3.6 Flash）|约 12k 个字符 |
 |`gemini-3.5-flash`| gemini-3.6-flash 的别名 |约 12k 个字符 |
 |`gemini-3.5-flash-thinking`|延伸思维，最长产出 |**约 20,000 个字符**|
 |`gemini-3.5-flash-thinking-lite`|适应性思维深度|约 15,000 个字符 |
-|`gemini-3.1-pro`|高级数学和代码（需要 cookie）|约 12k 个字符 |
+|`gemini-3.1-pro`|高级数学和代码（需要 Pro cookie）|约 12k 个字符 |
 |`gemini-auto`|汽车选型|变化 |
 |`gemini-flash-lite`|最快的答案，轻量级 | 〜10k 个字符 |
 
 ### 思考深度
 
-附加`@think=N`任何模型名称来控制推理逻辑：
+附加`@think=N`任意模型名称来控制推理逻辑（对应Web UI Thinking级别子菜单）：
 
 ```text
-gemini-3.5-flash-thinking@think=0   # deepest (default for thinking model)
-gemini-3.5-flash-thinking@think=2   # medium
-gemini-3.5-flash-thinking@think=4   # shallowest
+gemini-4-argon@think=0              # High (deepest reasoning, default for thinking models)
+gemini-4-argon@think=2              # Medium
+gemini-4-argon@think=4              # Low (default for standard models)
 ```
+
+### 模型检查头
+
+每个 API 响应（JSON 和流式 SSE）都包含指示实际模型路由的 HTTP 响应标头：
+
+* `X-Resolved-Model`：实际路由到的后端模型标识符（例如`gemini-4-argon`).
+* `X-Model-Fallback: true`：每当请求未映射的模型并回退到默认模型时都包含在内。
 
 ## 高级功能（独家）
 
-### 1. 视觉/多模式上传
+### 1.动态模型发现和上游路由头
+
+当使用帐户 cookie 进行身份验证时，代理会动态查询 Gemini 的`otAQ7b`启动期间进行 RPC 以发现可用模型和帐户层容量。它附加所需的上游路由标头（`x-goog-ext-525001261-jspb`）匹配 Web 应用程序行为，允许 Gemini 4 Argon 等模型正确路由。
+
+### 2. 视觉/多模式上传
 
 与忽略图像的 Python 版本不同，此 Go 端口主动拦截`image_url`有效负载（base64 编码和外部 HTTP URL）。
 它启动后台 Scotty 可恢复上传会话，将 base64 图像转换为 Google 内部 WIZ blob，并将 WIZ 图像引用直接传递给 Gemini。
 只需发送 OpenAI 标准多模式有效负载，它就会起作用！
 
-### 2. TLS 模拟（绕过 WAF）
+### 3. TLS 模拟（绕过 WAF）
 
 如果您在 Google 使用 403 Forbidden 阻止 IP 的数据中心（如 AWS/DigitalOcean）中运行此工具，您可以模拟真实浏览器的 TLS 签名：
 
@@ -210,12 +225,12 @@ gemini-3.5-flash-thinking@think=4   # shallowest
 
 或者在`config.json`:`"impersonate": "chrome_120"`。支持的配置文件包括`chrome_112`到`chrome_130`,`edge`， 和`safari`.
 
-## 可选：Pro 版 Cookie
+## 可选：Pro 和 Argon 的 Cookie
 
-匿名访问适用于所有型号，但是`gemini-3.1-pro`无需身份验证即可路由至 Flash。要获得真正的 Pro 路由，您需要一个**Gemini 高级版（付费订阅）**&#x5E10;户cookie：
+匿名访问适用于 Flash 模型，但是`gemini-4-argon`和`gemini-3.1-pro`需要经过身份验证**谷歌人工智能专业版/高级版**帐户会话。如果没有身份验证，上游会将请求路由到 Flash。
 
 ```bash
-./gemini-web2api --cookie-file cookie.txt
+./gemini-web2api --cookie-file gemini-auth.json
 ```
 
 ### 如何获取cookies
