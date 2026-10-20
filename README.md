@@ -95,6 +95,8 @@ cp config.example.json config.json
 
 #### Option A: Run pre-built GHCR Image (No git clone needed)
 
+The pre-built image is multi-arch (`linux/amd64` and `linux/arm64`), so it runs natively on x86_64 servers, Apple Silicon, and ARM64 devices.
+
 ```bash
 docker run -d --name gemini-web2api -p 8081:8081 ghcr.io/ikhsan3adi/gemini-web2api:latest
 ```
