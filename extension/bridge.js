@@ -333,49 +333,66 @@
   function simulateClick(el) {
     if (!el) return;
     try { if (el.focus) el.focus(); } catch (e) {}
-    el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
-    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-    el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
-    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + Math.max(1, rect.width / 2);
+    const y = rect.top + Math.max(1, rect.height / 2);
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: x,
+      clientY: y
+    };
+    el.dispatchEvent(new PointerEvent("pointerdown", opts));
+    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    el.dispatchEvent(new PointerEvent("pointerup", opts));
+    el.dispatchEvent(new MouseEvent("mouseup", opts));
     el.click();
   }
 
   function findModelTriggerElement() {
-    // Strategy 1: Find microphone button and look at adjacent buttons/elements
-    const micEls = queryDeep('mat-icon[data-mat-icon-name*="mic"], button[aria-label*="mic" i], button[mattooltip*="mic" i]');
-    for (const mic of micEls) {
-      if (isNavigationOrSidebar(mic)) continue;
-      const micBtn = mic.closest("button") || mic;
-      let sibling = micBtn.previousElementSibling;
-      while (sibling) {
-        const text = (sibling.innerText || sibling.textContent || "").trim();
-        if (/auto|hydrogen|gemini|flash|pro/i.test(text)) {
-          return sibling.closest("button, [role='button'], [role='combobox'], [aria-haspopup]") || sibling;
-        }
-        sibling = sibling.previousElementSibling;
+    // Strategy 1: Explicit Angular Material / MDC menu trigger or button with exact "Auto" or model name
+    const candidates = queryDeep('button, [role="button"], [role="combobox"], [aria-haspopup], mat-select, .mat-mdc-menu-trigger, [class*="model-selector"], [class*="model-picker"]');
+    for (const el of candidates) {
+      if (isNavigationOrSidebar(el)) continue;
+      const t = (el.innerText || el.textContent || "").trim();
+      // Strictly match "Auto", "Auto keyboard_arrow_down", "Auto ∨", "Hydrogen", etc.
+      // Must NOT match broad containers like .bottom-bar that have multiple buttons!
+      if (/^(auto|hydrogen|gemini|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
+        return el;
       }
     }
 
-    // Strategy 2: Look inside the chat input box / bottom bar container
-    const inputContainers = queryDeep("form, .input-area, .chat-box, .input-container, discovery-engine-chat, .bottom-bar, mat-form-field");
-    for (const root of inputContainers) {
-      const els = queryDeep("button, [role='button'], [role='combobox'], mat-select, .mat-mdc-menu-trigger, [aria-haspopup], div, span", root);
-      for (const el of els) {
-        if (isNavigationOrSidebar(el)) continue;
-        const text = (el.innerText || el.textContent || "").trim();
-        if (/^auto\b/i.test(text) || /\bauto$/i.test(text) || text.toLowerCase() === "auto" || /auto\s*[\u25bc\u25bd\u2228\u2304v\u25be]/i.test(text)) {
-          return el.closest("button, [role='button'], [role='combobox'], [aria-haspopup]") || el;
+    // Strategy 2: Look for dropdown arrow icon near text "Auto"
+    const arrowIcons = queryDeep('mat-icon, svg, [data-icon]');
+    for (const icon of arrowIcons) {
+      if (isNavigationOrSidebar(icon)) continue;
+      const iconTxt = (icon.innerText || icon.textContent || "").trim().toLowerCase();
+      const iconName = (icon.getAttribute("data-mat-icon-name") || "").toLowerCase();
+      if (
+        iconTxt === "keyboard_arrow_down" || iconTxt === "expand_more" || iconTxt === "arrow_drop_down" ||
+        iconName.includes("arrow_down") || iconName.includes("expand_more")
+      ) {
+        const btn = icon.closest('button, [role="button"], [aria-haspopup], mat-select') || icon.parentElement;
+        if (btn && isVisible(btn) && !isNavigationOrSidebar(btn)) {
+          const btnTxt = (btn.innerText || btn.textContent || "").trim();
+          if (/^auto(\s|$)/i.test(btnTxt)) {
+            return btn;
+          }
         }
       }
     }
 
-    // Strategy 3: Page-wide search excluding navigation/sidebar
-    const allEls = queryDeep("button, [role='button'], [role='combobox'], mat-select, .mat-mdc-menu-trigger");
+    // Strategy 3: Leaf element with exact text "Auto"
+    const allEls = queryDeep('button, [role="button"], span, div');
     for (const el of allEls) {
       if (isNavigationOrSidebar(el)) continue;
-      const text = (el.innerText || el.textContent || "").trim();
-      if (/auto|hydrogen|gemini|flash|pro/i.test(text)) {
-        return el;
+      if (el.children.length <= 1) {
+        const t = (el.innerText || el.textContent || "").trim();
+        if (/^auto$/i.test(t)) {
+          return el.closest('button, [role="button"], [aria-haspopup], mat-select') || el;
+        }
       }
     }
 
@@ -409,21 +426,39 @@
     console.log("[Web2API Bridge] Triggering model dropdown (current text:", currentText, ")");
     simulateClick(trigger);
 
-    // Poll for menu overlay up to 1500ms
+    // Poll for menu overlay up to 2500ms
     const start = Date.now();
-    while (Date.now() - start < 1500) {
+    let detectedOptions = [];
+    while (Date.now() - start < 2500) {
       await new Promise((r) => setTimeout(r, 120));
-      const menuItems = queryDeep("[role='menuitem'], [role='option'], .mat-mdc-menu-item, .mat-menu-item, mat-list-item, button, span, div, a");
+      const menuItems = queryDeep(
+        ".cdk-overlay-container [role='menuitem'], .cdk-overlay-container [role='option'], " +
+        ".cdk-overlay-container button, .cdk-overlay-container .mat-mdc-menu-item, " +
+        ".mat-mdc-menu-item, .mat-menu-item, mat-list-item, [role='menuitem'], [role='option']"
+      );
+
+      detectedOptions = [];
       for (const item of menuItems) {
         if (isNavigationOrSidebar(item)) continue;
-        const itemText = (item.innerText || item.textContent || "").trim().toLowerCase();
-        if (targetKeywords.some((kw) => itemText.includes(kw))) {
+        const itemText = (item.innerText || item.textContent || "").trim();
+        if (itemText && !detectedOptions.includes(itemText)) {
+          detectedOptions.push(itemText);
+        }
+
+        const lower = itemText.toLowerCase();
+        if (targetKeywords.some((kw) => lower.includes(kw))) {
           console.log("[Web2API Bridge] Found and selecting model menu item:", itemText);
           simulateClick(item);
           await new Promise((r) => setTimeout(r, 250));
+          modelBtn.textContent = "✅ " + itemText;
           return true;
         }
       }
+    }
+
+    console.warn("[Web2API Bridge] Target model not found in dropdown. Detected options on page:", detectedOptions);
+    if (detectedOptions.length > 0) {
+      modelBtn.title = "Available models on page: " + detectedOptions.join(" | ");
     }
 
     // Click outside if not matched
@@ -432,7 +467,73 @@
   }
 
   function findSendButton(inputEl) {
-    // Strictly matching send/submit/arrow buttons; NEVER matching sidebar "Search" button
+    // Priority 1: Match icons with text or name "arrow_upward", "send", "arrow_forward"
+    // (Vertex AI Search send button uses <mat-icon>arrow_upward</mat-icon>)
+    const iconCandidates = queryDeep('mat-icon, svg, [data-icon], .material-icons, span, i');
+    for (const icon of iconCandidates) {
+      if (isNavigationOrSidebar(icon)) continue;
+      const text = (icon.innerText || icon.textContent || "").trim().toLowerCase();
+      const name = (icon.getAttribute("data-mat-icon-name") || "").toLowerCase();
+      const dataIcon = (icon.getAttribute("data-icon") || "").toLowerCase();
+      const aria = (icon.getAttribute("aria-label") || "").toLowerCase();
+
+      if (
+        text === "arrow_upward" || text === "send" || text === "arrow_forward" ||
+        name === "arrow_upward" || name === "send" || name === "arrow_forward" ||
+        dataIcon.includes("arrow-up") || dataIcon.includes("send") ||
+        aria.includes("send") || aria.includes("submit")
+      ) {
+        const btn = icon.closest('button, [role="button"]') || icon.parentElement;
+        if (btn && isVisible(btn) && !isNavigationOrSidebar(btn)) {
+          return btn;
+        }
+      }
+    }
+
+    // Priority 2: In Vertex AI Search, send button is right next to the mic button
+    const micCandidates = queryDeep('mat-icon, button[aria-label*="mic" i], button[mattooltip*="mic" i]');
+    for (const mic of micCandidates) {
+      if (isNavigationOrSidebar(mic)) continue;
+      const text = (mic.innerText || mic.textContent || "").trim().toLowerCase();
+      const name = (mic.getAttribute("data-mat-icon-name") || "").toLowerCase();
+      if (text === "mic" || name === "mic" || mic.getAttribute("aria-label")?.toLowerCase().includes("mic")) {
+        const micBtn = mic.closest('button, [role="button"]') || mic;
+        let sib = micBtn.nextElementSibling;
+        while (sib) {
+          const btn = (sib.tagName === "BUTTON" || sib.getAttribute("role") === "button")
+            ? sib
+            : sib.querySelector('button, [role="button"]');
+          if (btn && isVisible(btn) && !isNavigationOrSidebar(btn)) {
+            return btn;
+          }
+          sib = sib.nextElementSibling;
+        }
+      }
+    }
+
+    // Priority 3: Within the input container or bottom bar, find send/submit button
+    if (inputEl) {
+      const container = inputEl.closest("form, .bottom-bar, .input-area, .chat-box, .input-container, discovery-engine-chat, mat-form-field") || inputEl.parentElement;
+      if (container) {
+        const btns = queryDeep('button, [role="button"]', container);
+        for (const b of btns) {
+          if (!isNavigationOrSidebar(b) && isVisible(b)) {
+            const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+            const tip = (b.getAttribute("mattooltip") || "").toLowerCase();
+            const t = (b.innerText || b.textContent || "").trim().toLowerCase();
+            if (
+              aria.includes("send") || aria.includes("submit") || aria.includes("发送") ||
+              tip.includes("send") || tip.includes("submit") ||
+              t.includes("arrow_upward") || t.includes("send")
+            ) {
+              return b;
+            }
+          }
+        }
+      }
+    }
+
+    // Priority 4: Standard button selectors across the page
     const btnSelectors = [
       'button[aria-label*="Send" i]',
       'button[aria-label*="发送" i]',
@@ -440,30 +541,12 @@
       'button[mattooltip*="Send" i]',
       'button[mattooltip*="Submit" i]',
       'button.send-button',
-      'button[type="submit"]',
-      'button:has(mat-icon[data-mat-icon-name="send"])',
-      'button:has(mat-icon[data-mat-icon-name="arrow_forward"])',
-      'button:has(mat-icon[data-mat-icon-name="arrow_upward"])',
-      'button:has(svg[data-icon="send"])',
-      'button:has(svg[data-icon="arrow-up"])'
+      'button[type="submit"]'
     ];
-
-    // Priority 1: Check inside or immediately adjacent to chat input container
-    if (inputEl) {
-      const parentForm = inputEl.closest("form, mat-form-field, .input-area, .chat-box, .input-container, discovery-engine-chat, .bottom-bar, .input-wrapper") || inputEl.parentElement;
-      if (parentForm) {
-        for (const sel of btnSelectors) {
-          const btn = parentForm.querySelector(sel);
-          if (btn && isVisible(btn) && !btn.disabled && !isNavigationOrSidebar(btn)) return btn;
-        }
-      }
-    }
-
-    // Priority 2: Deep search across page, strictly excluding sidebar / navigation
     for (const sel of btnSelectors) {
       const btns = queryDeep(sel);
       for (const b of btns) {
-        if (!isNavigationOrSidebar(b) && isVisible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true") {
+        if (!isNavigationOrSidebar(b) && isVisible(b)) {
           return b;
         }
       }
@@ -506,6 +589,70 @@
     return false;
   }
 
+  function cleanResponseText(rawText) {
+    if (!rawText) return "";
+
+    // 1. Strip Lit / Polymer template markers like ?lit$203076504$ or lit$12345$
+    let text = rawText.replace(/\?lit\$[0-9a-zA-Z]+\$/g, "").replace(/lit\$[0-9a-zA-Z]+\$/g, "");
+
+    // 2. Strip disclaimer lines
+    text = text.replace(/Generative AI may display inaccurate information.*$/gim, "");
+    text = text.replace(/Generative AI is experimental.*$/gim, "");
+
+    // 3. Strip standalone UI control labels
+    const uiTerms = [
+      "auto",
+      "keyboard_arrow_down",
+      "arrow_upward",
+      "arrow_downward",
+      "arrow_forward",
+      "expand_more",
+      "arrow_drop_down",
+      "mic",
+      "send",
+      "stop",
+      "thumb_up",
+      "thumb_down",
+      "content_copy",
+      "more_vert",
+      "share",
+      "refresh"
+    ];
+
+    const lines = text.split("\n");
+    const filtered = lines.filter((l) => {
+      const trimmed = l.trim().toLowerCase();
+      if (!trimmed) return true;
+      return !uiTerms.includes(trimmed);
+    });
+
+    return filtered.join("\n").trim();
+  }
+
+  function isResponseElement(el) {
+    if (!el) return false;
+    if (isNavigationOrSidebar(el)) return false;
+
+    // Reject anything inside form, bottom bar, input area, or user queries
+    if (el.closest("form, .bottom-bar, .input-area, .chat-box-input, .input-container, mat-form-field, rich-textarea, user-query, .user-query, [user]")) {
+      return false;
+    }
+
+    // Reject if it contains input controls
+    if (el.querySelector("textarea, input, mat-form-field, rich-textarea")) {
+      return false;
+    }
+
+    // Reject if its text after cleaning is empty (e.g. only UI chrome or template markers)
+    const raw = extractDeepText(el);
+    const cleaned = cleanResponseText(raw);
+    if (!cleaned || cleaned.length === 0) {
+      return false;
+    }
+
+    return true;
+  }
+
   function findResponseElements() {
     const candidateSelectors = [
       // Vertex AI Search & Enterprise Google Cloud Discovery Engine
@@ -513,8 +660,8 @@
       "discovery-engine-markdown",
       "discovery-engine-message:not([user]):not(.user-message)",
       "discovery-engine-chat-message:not([user]):not(.user-message)",
-      "discovery-engine-answer",
       "discovery-engine-answer-content",
+      "discovery-engine-answer",
       ".summary-content",
       ".answer-content",
       ".answer-text",
@@ -527,44 +674,64 @@
       "[data-test-id*='response']",
       "[data-test-id*='agent']",
       "[data-test-id*='bot']",
-      "[data-test-id*='message']",
       // Consumer Gemini Web
       "message-content",
       ".model-response-text",
       ".markdown",
-      ".response-container",
       "model-response"
     ];
 
     for (const sel of candidateSelectors) {
       try {
         const els = queryDeep(sel);
-        const filtered = els.filter((el) => {
-          if (el.closest("user-query, .user-query, rich-textarea, form, .input-area, mat-form-field")) {
-            return false;
-          }
-          return true;
-        });
+        const filtered = els.filter(isResponseElement);
         if (filtered.length > 0) {
           return filtered;
         }
       } catch (e) {}
     }
 
-    // Dynamic fallback: look for any container that has text inside chat area
-    const fallbackEls = queryDeep("[class*='agent'], [class*='bot'], [class*='response'], [class*='answer'], [class*='summary'], [class*='markdown'], [role='article']");
-    const validFallbacks = fallbackEls.filter((el) => {
-      if (el.closest("user-query, .user-query, rich-textarea, form, .input-area, mat-form-field")) {
-        return false;
-      }
-      const t = extractDeepText(el);
-      return t && t.trim().length > 0;
-    });
-    if (validFallbacks.length > 0) {
-      return validFallbacks;
+    // Dynamic fallback
+    const fallbackEls = queryDeep(".message-content, [class*='agent'], [class*='bot'], [class*='answer'], [class*='markdown'], [role='article']");
+    const valid = fallbackEls.filter(isResponseElement);
+    if (valid.length > 0) {
+      return valid;
     }
 
     return [];
+  }
+
+  function setInputValue(el, val) {
+    el.focus();
+    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+      const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+      const setMethod = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      if (setMethod) {
+        setMethod.call(el, val);
+      } else {
+        el.value = val;
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true, composed: true }));
+      try {
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, composed: true, inputType: "insertText", data: val }));
+      } catch (e) {}
+      el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true, composed: true }));
+    } else {
+      el.focus();
+      document.execCommand("selectAll", false, null);
+      document.execCommand("delete", false, null);
+      let ok = false;
+      try {
+        ok = document.execCommand("insertText", false, val);
+      } catch (e) {}
+      if (!ok || !el.textContent.trim()) {
+        el.textContent = val;
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true, composed: true }));
+      try {
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, composed: true, inputType: "insertText", data: val }));
+      } catch (e) {}
+    }
   }
 
   // 3. Web Page DOM Interaction & Prompt Dispatch
@@ -582,56 +749,56 @@
     // Snapshot existing model response count before submitting
     const baselineResponses = findResponseElements();
     const baselineCount = baselineResponses.length;
-    const baselineLastText = baselineCount > 0 ? extractDeepText(baselineResponses[baselineCount - 1]) : "";
-
-    inputArea.focus();
+    const baselineLastText = baselineCount > 0 ? cleanResponseText(extractDeepText(baselineResponses[baselineCount - 1])) : "";
 
     // Insert text simulating user interaction
-    if (inputArea.tagName === "TEXTAREA" || inputArea.tagName === "INPUT") {
-      inputArea.value = prompt;
-      inputArea.dispatchEvent(new Event("input", { bubbles: true }));
-      inputArea.dispatchEvent(new Event("change", { bubbles: true }));
-    } else {
-      inputArea.focus();
-      inputArea.innerHTML = "";
-      try {
-        const ok = document.execCommand("insertText", false, prompt);
-        if (!ok || !inputArea.textContent.trim()) {
-          inputArea.textContent = prompt;
-        }
-      } catch (e) {
-        inputArea.textContent = prompt;
+    setInputValue(inputArea, prompt);
+
+    await new Promise((r) => setTimeout(r, 250));
+
+    // Poll up to 2500ms for send button to become enabled
+    let sendBtn = null;
+    const sendWaitStart = Date.now();
+    while (Date.now() - sendWaitStart < 2500) {
+      sendBtn = findSendButton(inputArea);
+      if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute("aria-disabled") !== "true") {
+        break;
       }
-      inputArea.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 100));
     }
 
-    await new Promise((r) => setTimeout(r, 200));
-
-    // B. Locate Send Button or trigger Enter
-    const sendBtn = findSendButton(inputArea);
-
     if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute("aria-disabled") !== "true") {
-      sendBtn.click();
-    } else {
-      const enterDown = new KeyboardEvent("keydown", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true
-      });
-      inputArea.dispatchEvent(enterDown);
+      console.log("[Web2API Bridge] Found enabled send button, clicking:", sendBtn);
+      simulateClick(sendBtn);
+      const icon = sendBtn.querySelector("mat-icon, svg");
+      if (icon) simulateClick(icon);
+    }
 
-      const enterUp = new KeyboardEvent("keyup", {
+    await new Promise((r) => setTimeout(r, 350));
+
+    // Fallback: If input is not cleared, dispatch Enter key
+    const currentInputVal = inputArea.value || inputArea.textContent || "";
+    if (currentInputVal.trim().length > 0) {
+      console.log("[Web2API Bridge] Input not cleared after click, attempting Enter key dispatch...");
+      const enterOpts = {
         key: "Enter",
         code: "Enter",
         keyCode: 13,
         which: 13,
         bubbles: true,
-        cancelable: true
-      });
-      inputArea.dispatchEvent(enterUp);
+        cancelable: true,
+        composed: true,
+        view: window
+      };
+      inputArea.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
+      inputArea.dispatchEvent(new KeyboardEvent("keypress", enterOpts));
+      inputArea.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
+
+      // Re-check send button
+      const retryBtn = findSendButton(inputArea);
+      if (retryBtn) {
+        simulateClick(retryBtn);
+      }
     }
 
     await new Promise((r) => setTimeout(r, 400));
@@ -652,6 +819,7 @@
       let lastText = "";
       let lastChangeTime = Date.now();
       let completed = false;
+      let hasStarted = false;
       const startTime = Date.now();
 
       function getActiveResponseText() {
@@ -659,7 +827,8 @@
         if (currentResponses.length === 0) return "";
 
         let targetEl = currentResponses[currentResponses.length - 1];
-        let fullText = extractDeepText(targetEl);
+        let rawText = extractDeepText(targetEl);
+        let fullText = cleanResponseText(rawText);
 
         // If turn count has not increased, check if new text was appended to existing element
         if (currentResponses.length === baselineCount && baselineLastText) {
@@ -695,6 +864,11 @@
         if (completed) return;
 
         const currentText = getActiveResponseText();
+        const generating = isGenerating();
+        if (generating || currentText.length > 0) {
+          hasStarted = true;
+        }
+
         if (currentText.length > lastText.length) {
           const delta = currentText.slice(lastText.length);
           lastText = currentText;
@@ -705,30 +879,34 @@
 
         const timeSinceChange = Date.now() - lastChangeTime;
         const timeSinceStart = Date.now() - startTime;
-        const generating = isGenerating();
         const sendReady = isSendButtonReady(inputArea);
+
+        // Do not finish before generation has started (unless timeout after 12s)
+        if (!hasStarted && timeSinceStart < 12000) {
+          return;
+        }
 
         // Completion criteria:
         // 1. Text has been captured and send button has re-enabled with no stop button
-        if (lastText.length > 0 && !generating && sendReady && timeSinceChange > 400) {
+        if (lastText.length > 0 && !generating && sendReady && timeSinceChange > 500) {
           finish();
           return;
         }
 
         // 2. Text has been captured, generation stopped, and text settled
-        if (lastText.length > 0 && !generating && timeSinceChange > 800) {
+        if (lastText.length > 0 && !generating && timeSinceChange > 1000) {
           finish();
           return;
         }
 
-        // 3. Text has settled for 2 seconds even if stop button state is ambiguous
-        if (lastText.length > 0 && timeSinceChange > 2000) {
+        // 3. Text has settled for 2.5 seconds even if stop button state is ambiguous
+        if (lastText.length > 0 && timeSinceChange > 2500) {
           finish();
           return;
         }
 
-        // 4. Safety fallback: if 15s elapsed and we have text, finish
-        if (lastText.length > 0 && timeSinceStart > 15000 && timeSinceChange > 1000) {
+        // 4. Safety fallback: if 20s elapsed and we have text, finish
+        if (lastText.length > 0 && timeSinceStart > 20000 && timeSinceChange > 1500) {
           finish();
           return;
         }
