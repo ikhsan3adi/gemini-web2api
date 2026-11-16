@@ -28,12 +28,14 @@ type Hub struct {
 	tabName       string
 	lastHeartbeat time.Time
 	pending       []*Request
+	inFlight      map[string]*Request
 	waiters       map[string]chan Chunk
 	pollNotify    chan struct{}
 }
 
 func NewHub() *Hub {
 	return &Hub{
+		inFlight:   make(map[string]*Request),
 		waiters:    make(map[string]chan Chunk),
 		pollNotify: make(chan struct{}, 1),
 	}
@@ -69,8 +71,16 @@ func (h *Hub) WaitForNextRequest(ctx context.Context, tabName string, timeout ti
 	if len(h.pending) > 0 {
 		req := h.pending[0]
 		h.pending = h.pending[1:]
+		h.inFlight[req.ID] = req
 		h.mu.Unlock()
 		return req, nil
+	}
+	// If a previous request was dispatched but the tab reconnected/reloaded before completing it, re-dispatch it
+	for id, req := range h.inFlight {
+		if _, exists := h.waiters[id]; exists && time.Since(req.CreatedAt) > 4*time.Second {
+			h.mu.Unlock()
+			return req, nil
+		}
 	}
 	notify := h.pollNotify
 	h.mu.Unlock()
@@ -82,6 +92,7 @@ func (h *Hub) WaitForNextRequest(ctx context.Context, tabName string, timeout ti
 		if len(h.pending) > 0 {
 			req := h.pending[0]
 			h.pending = h.pending[1:]
+			h.inFlight[req.ID] = req
 			return req, nil
 		}
 		return nil, nil
@@ -97,6 +108,9 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 	h.Touch("")
 
 	h.mu.Lock()
+	if c.Done || c.Error != "" {
+		delete(h.inFlight, c.ID)
+	}
 	ch, exists := h.waiters[c.ID]
 	h.mu.Unlock()
 
@@ -140,6 +154,7 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 	defer func() {
 		h.mu.Lock()
 		delete(h.waiters, reqID)
+		delete(h.inFlight, reqID)
 		for i, r := range h.pending {
 			if r.ID == reqID {
 				h.pending = append(h.pending[:i], h.pending[i+1:]...)
