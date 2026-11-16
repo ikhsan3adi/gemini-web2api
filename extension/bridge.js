@@ -358,6 +358,37 @@
     el.click();
   }
 
+  function clickItemThoroughly(el) {
+    if (!el) return;
+    simulateClick(el);
+    if (el.parentElement) simulateClick(el.parentElement);
+    const inner = el.querySelector("span, div, button") || el;
+    if (inner && inner !== el) simulateClick(inner);
+  }
+
+  function closeAnyOpenDropdown() {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, composed: true }));
+    const backdrops = queryDeep('.cdk-overlay-backdrop, .mat-overlay-backdrop, [class*="backdrop"]');
+    for (const bd of backdrops) {
+      if (isVisible(bd)) simulateClick(bd);
+    }
+  }
+
+  function findHydrogenItem() {
+    const all = queryDeep("*");
+    for (const el of all) {
+      if (isNavigationOrSidebar(el)) continue;
+      const t = (el.innerText || el.textContent || "").trim();
+      const lower = t.toLowerCase();
+      // Must contain "hydrogen" and NOT contain other model names (to avoid container match)
+      if (lower.includes("hydrogen") && !lower.includes("carbon") && !lower.includes("argon") && !lower.includes("flash")) {
+        const item = el.closest('button, [role="menuitem"], [role="option"], [role="button"], li, mat-option, [class*="item"], [class*="option"], [class*="model"]') || el;
+        return item;
+      }
+    }
+    return null;
+  }
+
   function findModelTriggerElement() {
     // Strategy 1: Look next to the mic icon (In Vertex AI Search, Auto is right next to mic!)
     const micIcons = queryDeep('mat-icon, [data-mat-icon-name="mic"], button[aria-label*="mic" i], [data-icon*="mic"]');
@@ -366,14 +397,16 @@
       const t = (mic.innerText || mic.textContent || "").trim().toLowerCase();
       const n = (mic.getAttribute("data-mat-icon-name") || "").toLowerCase();
       if (t === "mic" || n === "mic") {
-        const micBtn = mic.closest('button, [role="button"]') || mic;
-        let sib = micBtn.previousElementSibling;
-        while (sib) {
-          const sText = (sib.innerText || sib.textContent || "").trim().toLowerCase();
-          if (/auto|hydrogen|gemini|carbon|argon|flash|pro/i.test(sText)) {
-            return sib.closest('button, [role="button"], [aria-haspopup], mat-select, div') || sib;
+        const container = mic.closest('.bottom-bar, form, discovery-engine-chat, div') || mic.parentElement;
+        if (container) {
+          const candidates = queryDeep('button, [role="button"], [aria-haspopup], mat-select, div', container);
+          for (const b of candidates) {
+            if (b.contains(mic) || mic.contains(b)) continue;
+            const txt = (b.innerText || b.textContent || "").trim().toLowerCase();
+            if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)(\s|$)/i.test(txt) && isVisible(b)) {
+              return b;
+            }
           }
-          sib = sib.previousElementSibling;
         }
       }
     }
@@ -383,8 +416,6 @@
     for (const el of candidates) {
       if (isNavigationOrSidebar(el)) continue;
       const t = (el.innerText || el.textContent || "").trim();
-      // Strictly match "Auto", "Auto keyboard_arrow_down", "Auto ∨", "Hydrogen", etc.
-      // Must NOT match broad containers like .bottom-bar that have multiple buttons!
       if (/^(auto|hydrogen|gemini|gemini\s*4\s*hydrogen|carbon|argon|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
         return el;
       }
@@ -410,42 +441,6 @@
       }
     }
 
-    // Strategy 4: Leaf element with exact text "Auto"
-    const allEls = queryDeep('button, [role="button"], span, div');
-    for (const el of allEls) {
-      if (isNavigationOrSidebar(el)) continue;
-      if (el.children.length <= 1) {
-        const t = (el.innerText || el.textContent || "").trim();
-        if (/^auto$/i.test(t)) {
-          return el.closest('button, [role="button"], [aria-haspopup], mat-select') || el;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  function findModelOptionInDOM(targetKeywords, excludeEl) {
-    const allEls = queryDeep("*");
-    for (const el of allEls) {
-      if (isNavigationOrSidebar(el)) continue;
-      // Skip large container elements; match leaf or near-leaf menu items
-      if (el.children.length > 3) continue;
-
-      const txt = (el.innerText || el.textContent || "").trim();
-      if (!txt) continue;
-
-      const lower = txt.toLowerCase();
-      if (targetKeywords.some((kw) => lower.includes(kw))) {
-        const clickable = el.closest("button, [role='button'], [role='menuitem'], [role='option'], li, div") || el;
-        if (excludeEl && (clickable === excludeEl || excludeEl.contains(clickable))) {
-          continue;
-        }
-        if (isVisible(clickable)) {
-          return clickable;
-        }
-      }
-    }
     return null;
   }
 
@@ -471,41 +466,39 @@
       }
     }
 
-    // Check if dropdown is already open right now (e.g. from user click or previous attempt)
-    let option = findModelOptionInDOM(targetKeywords, trigger);
-    if (option) {
-      console.log("[Web2API Bridge] Menu already open, clicking model option directly:", option);
-      simulateClick(option);
+    // 1. If dropdown is already open right now, click Hydrogen directly
+    let item = findHydrogenItem();
+    if (item && isVisible(item)) {
+      console.log("[Web2API Bridge] Dropdown already open, clicking Hydrogen item:", item);
+      clickItemThoroughly(item);
       await new Promise((r) => setTimeout(r, 200));
       modelBtn.textContent = "✅ Gemini 4 Hydrogen";
       return true;
     }
 
-    if (!trigger) {
-      console.warn("[Web2API Bridge] Could not find model selector dropdown trigger");
-      return false;
-    }
+    // 2. Open dropdown via trigger button
+    if (trigger) {
+      console.log("[Web2API Bridge] Triggering model dropdown via trigger element:", trigger);
+      clickItemThoroughly(trigger);
+      await new Promise((r) => setTimeout(r, 200));
 
-    console.log("[Web2API Bridge] Triggering model dropdown via trigger element:", trigger);
-    simulateClick(trigger);
-
-    // Poll for menu overlay or items up to 3000ms
-    const start = Date.now();
-    while (Date.now() - start < 3000) {
-      await new Promise((r) => setTimeout(r, 100));
-      option = findModelOptionInDOM(targetKeywords, trigger);
-      if (option) {
-        console.log("[Web2API Bridge] Found model menu option, clicking:", option);
-        simulateClick(option);
-        await new Promise((r) => setTimeout(r, 250));
-        modelBtn.textContent = "✅ Gemini 4 Hydrogen";
-        return true;
+      const start = Date.now();
+      while (Date.now() - start < 2500) {
+        item = findHydrogenItem();
+        if (item && isVisible(item)) {
+          console.log("[Web2API Bridge] Found model menu option, clicking:", item);
+          clickItemThoroughly(item);
+          await new Promise((r) => setTimeout(r, 250));
+          modelBtn.textContent = "✅ Gemini 4 Hydrogen";
+          return true;
+        }
+        await new Promise((r) => setTimeout(r, 100));
       }
     }
 
     console.warn("[Web2API Bridge] Target model not found in dropdown");
-    // Click outside to close menu if not matched
-    document.body.click();
+    // Ensure any open dropdown is closed so it NEVER blocks the chat input!
+    closeAnyOpenDropdown();
     return false;
   }
 
@@ -514,9 +507,29 @@
     const t = (btn.innerText || btn.textContent || "").trim().toLowerCase();
     const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
     const tip = (btn.getAttribute("mattooltip") || "").toLowerCase();
+    const icon = btn.querySelector("mat-icon, svg, [data-mat-icon-name]");
+    const iconName = (icon?.getAttribute("data-mat-icon-name") || "").toLowerCase();
+    const iconText = (icon?.innerText || icon?.textContent || "").trim().toLowerCase();
+
+    // Model selectors
     if (/auto|hydrogen|carbon|argon|flash|pro/i.test(t) || /auto|hydrogen/i.test(aria) || /auto|hydrogen/i.test(tip)) return true;
-    if (t === "mic" || aria.includes("mic") || tip.includes("mic")) return true;
-    if (t.includes("keyboard_arrow_down") && /auto|hydrogen/i.test(t)) return true;
+    if (t.includes("keyboard_arrow_down") || iconName.includes("arrow_down") || iconText.includes("keyboard_arrow_down")) return true;
+
+    // Mic button
+    if (t === "mic" || aria.includes("mic") || tip.includes("mic") || iconName === "mic" || iconText === "mic") return true;
+
+    // Add / attachment (+)
+    if (t === "add" || t === "+" || aria.includes("add") || aria.includes("attach") || aria.includes("upload") || iconName === "add" || iconText === "add" || tip.includes("add")) return true;
+
+    // Tune / sliders / filter / parameters
+    if (t === "tune" || t === "sliders" || aria.includes("tune") || aria.includes("filter") || aria.includes("parameter") || iconName === "tune" || iconText === "tune" || tip.includes("tune")) return true;
+
+    // Cloud / data store / grounding
+    if (t.includes("cloud") || aria.includes("cloud") || aria.includes("store") || aria.includes("ground") || iconName.includes("cloud") || iconText.includes("cloud")) return true;
+
+    // Thumbs, copy, share, download
+    if (aria.includes("thumb") || aria.includes("copy") || aria.includes("share") || aria.includes("download") || iconName.includes("thumb") || iconName.includes("copy")) return true;
+
     return false;
   }
 
@@ -546,41 +559,7 @@
       }
     }
 
-    // Priority 2: In Vertex AI Search, send button is right next to the mic button
-    const micCandidates = queryDeep('mat-icon, button[aria-label*="mic" i], button[mattooltip*="mic" i]');
-    for (const mic of micCandidates) {
-      if (isNavigationOrSidebar(mic, inputEl)) continue;
-      const text = (mic.innerText || mic.textContent || "").trim().toLowerCase();
-      const name = (mic.getAttribute("data-mat-icon-name") || "").toLowerCase();
-      if (text === "mic" || name === "mic" || mic.getAttribute("aria-label")?.toLowerCase().includes("mic")) {
-        const micBtn = mic.closest('button, [role="button"]') || mic;
-        let sib = micBtn.nextElementSibling;
-        while (sib) {
-          const btn = (sib.tagName === "BUTTON" || sib.getAttribute("role") === "button")
-            ? sib
-            : sib.querySelector('button, [role="button"]');
-          if (btn && isVisible(btn) && !isNotSendButton(btn) && !candidates.includes(btn)) {
-            candidates.push(btn);
-          }
-          sib = sib.nextElementSibling;
-        }
-      }
-    }
-
-    // Priority 3: Within the input container or bottom bar, find any button that isn't Auto or mic
-    if (inputEl) {
-      const container = inputEl.closest("form, .bottom-bar, .input-area, .chat-box, .input-container, discovery-engine-chat, mat-form-field") || inputEl.parentElement;
-      if (container) {
-        const btns = queryDeep('button, [role="button"]', container);
-        for (const b of btns) {
-          if (isVisible(b) && !isNotSendButton(b) && !candidates.includes(b)) {
-            candidates.push(b);
-          }
-        }
-      }
-    }
-
-    // Priority 4: Standard button selectors across the page
+    // Priority 2: Standard button selectors across the page
     const btnSelectors = [
       'button[aria-label*="Send" i]',
       'button[aria-label*="发送" i]',
@@ -613,10 +592,14 @@
   }
 
   async function submitPrompt(inputArea) {
+    // 1. Ensure any open dropdowns or overlays are closed before typing/sending
+    closeAnyOpenDropdown();
+    inputArea.focus();
+
     const candidateBtns = findAllCandidateSendButtons(inputArea);
     console.log("[Web2API Bridge] Candidate send buttons found:", candidateBtns.length, candidateBtns);
 
-    // Stage 1: Try clicking candidate buttons with disabled attribute clearing
+    // Stage 1: Try clicking candidate buttons
     for (const btn of candidateBtns) {
       console.log("[Web2API Bridge] Attempting click on candidate send button:", btn);
       try {
@@ -626,10 +609,7 @@
         btn.classList.remove("disabled", "mat-button-disabled", "mdc-button--disabled");
       } catch (e) {}
 
-      simulateClick(btn);
-      const icon = btn.querySelector("mat-icon, svg, span, i");
-      if (icon) simulateClick(icon);
-
+      clickItemThoroughly(btn);
       await new Promise((r) => setTimeout(r, 250));
 
       const remaining = (inputArea.value || inputArea.textContent || "").trim();
@@ -639,8 +619,9 @@
       }
     }
 
-    // Stage 2: Dispatch Enter key events (composed: true for shadow DOM)
-    console.log("[Web2API Bridge] Buttons did not clear input, dispatching Enter key...");
+    // Stage 2: Dispatch Enter key events (Enter submits in Vertex AI Search)
+    console.log("[Web2API Bridge] Dispatching Enter key...");
+    inputArea.focus();
     const enterOpts = {
       key: "Enter",
       code: "Enter",
@@ -652,21 +633,13 @@
       composed: true,
       view: window
     };
-
-    inputArea.focus();
     inputArea.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
     inputArea.dispatchEvent(new KeyboardEvent("keypress", enterOpts));
     inputArea.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
 
-    // Also dispatch on parent element and shadow host if inside shadow DOM
     if (inputArea.parentElement) {
       inputArea.parentElement.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
       inputArea.parentElement.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
-    }
-    const rootNode = inputArea.getRootNode();
-    if (rootNode && rootNode.host) {
-      rootNode.host.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
-      rootNode.host.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
     }
 
     await new Promise((r) => setTimeout(r, 300));
@@ -676,18 +649,17 @@
       return true;
     }
 
-    // Stage 3: Form requestSubmit / submit
+    // Stage 3: Form requestSubmit
     if (inputArea.form) {
-      console.log("[Web2API Bridge] Attempting form.requestSubmit()...");
       try {
         if (inputArea.form.requestSubmit) inputArea.form.requestSubmit();
         else inputArea.form.submit();
       } catch (e) {}
     }
 
-    // Stage 4: Secondary click retry on all candidate buttons
+    // Stage 4: Secondary click retry
     for (const btn of candidateBtns) {
-      simulateClick(btn);
+      clickItemThoroughly(btn);
     }
 
     await new Promise((r) => setTimeout(r, 300));

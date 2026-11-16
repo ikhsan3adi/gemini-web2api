@@ -182,14 +182,27 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = writeSSEData(w, firstChunk)
 
-			// Keepalive ticker flushes SSE comments every 8s to prevent client connection timeout
+			// Keepalive ticker flushes empty delta chunks every 5s to keep client stream parser active
+			// and prevent client-side idle timeouts ("User Cancelled").
 			stopKeepalive := make(chan struct{})
-			keepaliveTicker := time.NewTicker(8 * time.Second)
+			keepaliveTicker := time.NewTicker(5 * time.Second)
 			go func() {
 				for {
 					select {
 					case <-keepaliveTicker.C:
-						_ = writeSSEComment(w, "keepalive")
+						pingChunk := models.OpenAIChatResponse{
+							ID:      cid,
+							Object:  "chat.completion.chunk",
+							Created: time.Now().Unix(),
+							Model:   resolved.Name,
+							Choices: []models.OpenAIChoice{
+								{
+									Index: 0,
+									Delta: &models.OpenAIMessage{},
+								},
+							},
+						}
+						_ = writeSSEData(w, pingChunk)
 					case <-stopKeepalive:
 						keepaliveTicker.Stop()
 						return
