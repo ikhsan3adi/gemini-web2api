@@ -30,7 +30,7 @@
 
 ### 1.下载预构建的二进制文件（推荐）
 
-从以下地址下载适用于您的操作系统（Linux、macOS、Windows）的预编译二进制文件[发布](https://github.com/ikhsan3adi/gemini-web2api/releases)页：
+从以下地址下载适用于您的操作系统（Linux、macOS、Windows）的预编译二进制文件[发布](https://github.com/Hau04/gemini-web2api/releases)页：
 
 **Linux / macOS：**
 
@@ -50,7 +50,7 @@ chmod +x gemini-web2api
 如果您的系统上安装了 Go 1.22+：
 
 ```bash
-go install github.com/ikhsan3adi/gemini-web2api@latest
+go install github.com/Hau04/gemini-web2api@latest
 ```
 
 这将编译二进制文件并将其直接放入您的`$GOPATH/bin`（或者`%USERPROFILE%\go\bin`）。从任何地方运行它：
@@ -64,7 +64,7 @@ gemini-web2api --port 8081
 先决条件：Go 1.22+
 
 ```bash
-git clone https://github.com/ikhsan3adi/gemini-web2api.git
+git clone https://github.com/Hau04/gemini-web2api.git
 cd gemini-web2api
 ```
 
@@ -97,8 +97,10 @@ cp config.example.json config.json
 #### 选项 A：运行预构建的 GHCR 映像（无需 git 克隆）
 
 ```bash
-docker run -d --name gemini-web2api -p 8081:8081 ghcr.io/ikhsan3adi/gemini-web2api:latest
+docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.json ghcr.io/hau04/gemini-web2api:latest
 ```
+
+*（若不需要额外配置，可省略挂载参数 `-v ./config.json:/app/config.json` 使用默认配置运行）。*
 
 #### 选项 B：本地构建并运行
 
@@ -113,7 +115,9 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
-> **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
+> **注意**：如果在 `config.json` 中配置了 Cookie 文件路径（如 `"cookie_file": "/app/cookie.txt"`），运行容器时记得同时挂载 Cookie 文件：`-v ./cookie.txt:/app/cookie.txt`。
+>
+> **注意**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
 
 ## 客户端配置
 
@@ -176,6 +180,8 @@ gemini
 | -------------------------------- | ------------------------------------------------------------------ | --------------- |
 |`gemini-4-argon`|复杂任务的前沿模型（需要 Pro）|**~20k+ 字符**|
 |`argon`,`gemini-4`| Gemini-4-argon 的别名 |**~20k+ 字符**|
+|`gemini-4-hydrogen`|高速度前沿执行模型（Gemini 4 Hydrogen）|**~20k+ 字符**|
+|`hydrogen`| gemini-4-hydrogen 的别名 |**~20k+ 字符**|
 |`gemini-3.8-flash`|最新全能机型（Gemini 3.8 Flash）|约 12k 个字符 |
 |`gemini-3.7-flash`|全能机型（Gemini 3.7 Flash）|约 12k 个字符 |
 |`gemini-3.6-flash`|全能机型（Gemini 3.6 Flash）|约 12k 个字符 |
@@ -276,6 +282,47 @@ https://gemini.google.com/u/1/app/...
 如果经过身份验证的请求返回 HTTP 400`xsrf`错误，刷新Gemini Web，更新`xsrf_token`，并确保`auth_user`匹配`/u/<index>/`浏览器 URL 的一部分。
 
 专业路由需要**双子座高级版**（付费订阅）。免费的 Google 帐户 cookie 将进行身份验证，但会默默地退回到 Flash。
+
+### Gemini 企业版（Vertex AI Search）支持
+
+如果您的企业使用托管于 `https://vertexaisearch.cloud.google.com/` 的 **Gemini Enterprise**，可配置 `base_url`：
+
+```json
+{
+  "base_url": "https://vertexaisearch.cloud.google.com",
+  "cookie_file": "/app/cookie.txt"
+}
+```
+
+或通过命令行启动参数：
+
+```bash
+./gemini-web2api --base-url https://vertexaisearch.cloud.google.com --cookie-file cookie.txt
+```
+
+配置自定义 `base_url` 时，`gemini-web2api` 会自动将 `Origin`、`Referer`、`SAPISIDHASH` 认证计算和 RPC 端点切换为对应企业域名。
+
+### WorkBuddy / AI 编程智能体接入
+
+`gemini-web2api` 可无缝接入 **WorkBuddy**、**CodeBuddy**、Cursor、Claude Code、Aider 等编程助手。得益于内置的完整 OpenAI 工具调用（`tools` / `tool_calls`）支持，智能体能够自动在本地查看与编辑文件。
+
+配置 WorkBuddy (`~/.workbuddy/models.json` 或 Windows 的 `%USERPROFILE%\.workbuddy\models.json`)：
+
+```json
+[
+  {
+    "id": "gemini-4-hydrogen",
+    "name": "Gemini 4 Hydrogen",
+    "vendor": "Custom",
+    "apiKey": "sk-gemini",
+    "baseURL": "http://localhost:8081/v1",
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "useCustomProtocol": false
+  }
+]
+```
 
 ## 配置
 

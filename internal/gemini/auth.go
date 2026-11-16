@@ -117,11 +117,18 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 }
 
 func SAPISIDHash(sapisid string) string {
+	return SAPISIDHashWithOrigin(sapisid, "https://gemini.google.com")
+}
+
+func SAPISIDHashWithOrigin(sapisid, origin string) string {
 	if sapisid == "" {
 		return ""
 	}
+	if origin == "" {
+		origin = "https://gemini.google.com"
+	}
 	ts := time.Now().Unix()
-	input := fmt.Sprintf("%d %s https://gemini.google.com", ts, sapisid)
+	input := fmt.Sprintf("%d %s %s", ts, sapisid, origin)
 	h := sha1.Sum([]byte(input))
 	return fmt.Sprintf("SAPISIDHASH %d_%s", ts, hex.EncodeToString(h[:]))
 }

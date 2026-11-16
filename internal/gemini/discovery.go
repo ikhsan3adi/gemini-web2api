@@ -108,7 +108,12 @@ func (c *Client) DiscoverModels() ([]DiscoveredModel, error) {
 		q.Set("bl", bl)
 	}
 
-	endpoint := fmt.Sprintf("https://gemini.google.com%s/_/BardChatUi/data/batchexecute?%s", prefix, q.Encode())
+	baseURL := c.Cfg.BaseURL
+	if baseURL == "" {
+		baseURL = "https://gemini.google.com"
+	}
+
+	endpoint := fmt.Sprintf("%s%s/_/BardChatUi/data/batchexecute?%s", baseURL, prefix, q.Encode())
 
 	freq, _ := json.Marshal([]any{[]any{[]any{"otAQ7b", "[]", nil, "generic"}}})
 	form := url.Values{}

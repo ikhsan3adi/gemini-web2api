@@ -29,7 +29,7 @@ This is a complete Go rewrite of the original [Python gemini-web2api](https://gi
 
 ### 1. Download Pre-built Binary (Recommended)
 
-Download the pre-compiled binary for your OS (Linux, macOS, Windows) from the [Releases](https://github.com/ikhsan3adi/gemini-web2api/releases) page:
+Download the pre-compiled binary for your OS (Linux, macOS, Windows) from the [Releases](https://github.com/Hau04/gemini-web2api/releases) page:
 
 **Linux / macOS:**
 
@@ -49,7 +49,7 @@ chmod +x gemini-web2api
 If you have Go 1.22+ installed on your system:
 
 ```bash
-go install github.com/ikhsan3adi/gemini-web2api@latest
+go install github.com/Hau04/gemini-web2api@latest
 ```
 
 This compiles and places the binary directly into your `$GOPATH/bin` (or `%USERPROFILE%\go\bin`). Run it from anywhere:
@@ -63,7 +63,7 @@ gemini-web2api --port 8081
 Prerequisites: Go 1.22+
 
 ```bash
-git clone https://github.com/ikhsan3adi/gemini-web2api.git
+git clone https://github.com/Hau04/gemini-web2api.git
 cd gemini-web2api
 ```
 
@@ -96,8 +96,10 @@ cp config.example.json config.json
 #### Option A: Run pre-built GHCR Image (No git clone needed)
 
 ```bash
-docker run -d --name gemini-web2api -p 8081:8081 ghcr.io/ikhsan3adi/gemini-web2api:latest
+docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.json ghcr.io/hau04/gemini-web2api:latest
 ```
+
+*(If you do not have a `config.json`, simply omit `-v ./config.json:/app/config.json` to run with default settings).*
 
 #### Option B: Build and run locally
 
@@ -112,6 +114,8 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
+> **Note**: If you configure a cookie file in `config.json` (e.g. `"cookie_file": "/app/cookie.txt"`), remember to mount your cookie file as well: `-v ./cookie.txt:/app/cookie.txt`.
+>
 > **Note**: If you get empty responses (`content: null`) with Docker's default bridge network, switch to host networking: `docker run --network host ...` or add `network_mode: host` in your compose file. This is caused by Gemini's upstream rejecting requests from certain Docker NAT IP ranges.
 
 ## Client Configuration
@@ -175,6 +179,8 @@ Supports Google native API endpoints:
 | -------------------------------- | -------------------------------------------- | --------------- |
 | `gemini-4-argon`                 | Frontier model for complex tasks (needs Pro) | **~20k+ chars** |
 | `argon`, `gemini-4`              | Aliases for gemini-4-argon                   | **~20k+ chars** |
+| `gemini-4-hydrogen`              | High-speed frontier execution model          | **~20k+ chars** |
+| `hydrogen`                       | Alias for gemini-4-hydrogen                  | **~20k+ chars** |
 | `gemini-3.8-flash`               | Latest all-around model (Gemini 3.8 Flash)   | ~12k chars      |
 | `gemini-3.7-flash`               | All-around model (Gemini 3.7 Flash)          | ~12k chars      |
 | `gemini-3.6-flash`               | All-around model (Gemini 3.6 Flash)          | ~12k chars      |
@@ -274,6 +280,47 @@ Example:
 If authenticated requests return HTTP 400 with an `xsrf` error, refresh Gemini Web, update `xsrf_token`, and make sure `auth_user` matches the `/u/<index>/` part of the browser URL.
 
 Pro routing requires **Gemini Advanced** (paid subscription). A free Google account cookie will authenticate but silently fall back to Flash.
+
+### Gemini Enterprise (Vertex AI Search) Support
+
+If your organization uses **Gemini Enterprise** hosted at `https://vertexaisearch.cloud.google.com/`, configure `base_url`:
+
+```json
+{
+  "base_url": "https://vertexaisearch.cloud.google.com",
+  "cookie_file": "/app/cookie.txt"
+}
+```
+
+Or pass via command-line:
+
+```bash
+./gemini-web2api --base-url https://vertexaisearch.cloud.google.com --cookie-file cookie.txt
+```
+
+When `base_url` is customized, `gemini-web2api` automatically switches its `Origin`, `Referer`, `SAPISIDHASH` calculations, and RPC endpoints to match your enterprise domain.
+
+### WorkBuddy / AI Coding Agent Integration
+
+`gemini-web2api` works as a drop-in OpenAI-compatible provider for coding agents like **WorkBuddy**, **CodeBuddy**, Cursor, Claude Code, Aider, and Cline. Because `gemini-web2api` natively proxies OpenAI function calling (`tools` / `tool_calls`), agents can autonomously inspect and edit local files.
+
+Configure WorkBuddy via `~/.workbuddy/models.json` (or `%USERPROFILE%\.workbuddy\models.json` on Windows):
+
+```json
+[
+  {
+    "id": "gemini-4-hydrogen",
+    "name": "Gemini 4 Hydrogen",
+    "vendor": "Custom",
+    "apiKey": "sk-gemini",
+    "baseURL": "http://localhost:8081/v1",
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "useCustomProtocol": false
+  }
+]
+```
 
 ## Configuration
 

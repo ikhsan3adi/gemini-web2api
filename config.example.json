@@ -15,5 +15,6 @@
   "proxy": null,
   "log_requests": true,
   "impersonate": "",
-  "temporary_chats": false
+  "temporary_chats": false,
+  "base_url": "https://gemini.google.com"
 }
