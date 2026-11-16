@@ -111,6 +111,31 @@
   const statusText = document.createElement("span");
   statusText.textContent = "Web2API: Connecting...";
 
+  const modelBtn = document.createElement("button");
+  modelBtn.id = "web2api-model-btn";
+  modelBtn.textContent = "⚡ Hydrogen";
+  modelBtn.title = "Click to switch web model dropdown to Gemini 4 Hydrogen";
+  modelBtn.style.cssText = `
+    background: rgba(59, 130, 246, 0.35);
+    color: #93c5fd;
+    border: 1px solid rgba(147, 197, 253, 0.4);
+    border-radius: 12px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-left: 2px;
+    transition: all 0.15s ease;
+  `;
+  modelBtn.onmouseover = () => { modelBtn.style.background = "rgba(59, 130, 246, 0.6)"; };
+  modelBtn.onmouseout = () => { modelBtn.style.background = "rgba(59, 130, 246, 0.35)"; };
+  modelBtn.onclick = async (e) => {
+    e.stopPropagation();
+    modelBtn.textContent = "⏳ Setting...";
+    const ok = await ensureModelSelected("hydrogen");
+    modelBtn.textContent = ok ? "✅ Hydrogen" : "⚡ Hydrogen";
+    setTimeout(() => { modelBtn.textContent = "⚡ Hydrogen"; }, 2000);
+  };
+
   const refreshBtn = document.createElement("button");
   refreshBtn.id = "web2api-refresh-btn";
   refreshBtn.textContent = "🔄 Refresh";
@@ -140,6 +165,7 @@
 
   badgeContainer.appendChild(dot);
   badgeContainer.appendChild(statusText);
+  badgeContainer.appendChild(modelBtn);
   badgeContainer.appendChild(refreshBtn);
   document.body.appendChild(badgeContainer);
 
@@ -299,35 +325,99 @@
     throw new Error("Could not find Gemini chat input box. Please click inside chat box or refresh page.");
   }
 
+  function isNavigationOrSidebar(el) {
+    if (!el) return false;
+    return !!el.closest("nav, aside, mat-sidenav, .sidebar, .side-nav, .nav, .menu, header, [role='navigation'], [aria-label*='sidebar' i]");
+  }
+
+  // Automatically switch the model dropdown (e.g. "Auto ∨") to Gemini 4 Hydrogen
+  async function ensureModelSelected(requestedModel) {
+    if (!requestedModel) requestedModel = "hydrogen";
+    const targetKeywords = ["hydrogen", "gemini 4 hydrogen", "gemini-4-hydrogen"];
+    if (/flash/i.test(requestedModel)) {
+      targetKeywords.length = 0;
+      targetKeywords.push("flash");
+    } else if (/pro/i.test(requestedModel)) {
+      targetKeywords.length = 0;
+      targetKeywords.push("pro");
+    }
+
+    // Find candidate model dropdown button near the chat input (excluding navigation / sidebar)
+    const allBtns = queryDeep("button, [role='button'], mat-select, .mat-mdc-menu-trigger");
+    const candidateDropdowns = allBtns.filter((btn) => {
+      if (isNavigationOrSidebar(btn)) return false;
+      const text = (btn.innerText || btn.textContent || "").trim();
+      return /auto|hydrogen|gemini|flash|pro/i.test(text);
+    });
+
+    for (const dropdown of candidateDropdowns) {
+      const currentText = (dropdown.innerText || dropdown.textContent || "").trim().toLowerCase();
+      // If already Hydrogen, we are good!
+      if (targetKeywords.some((kw) => currentText.includes(kw))) {
+        console.log("[Web2API Bridge] Model already selected:", currentText);
+        return true;
+      }
+
+      // If it says "Auto" or other model, click to open dropdown
+      if (/auto|gemini|flash|pro/i.test(currentText)) {
+        console.log("[Web2API Bridge] Clicking model dropdown (current text:", currentText, ")");
+        dropdown.click();
+        await new Promise((r) => setTimeout(r, 300));
+
+        // Find menu item for Hydrogen
+        const menuItems = queryDeep("[role='menuitem'], [role='option'], .mat-mdc-menu-item, mat-list-item, button, span, div");
+        for (const item of menuItems) {
+          if (isNavigationOrSidebar(item)) continue;
+          const itemText = (item.innerText || item.textContent || "").trim().toLowerCase();
+          if (targetKeywords.some((kw) => itemText.includes(kw))) {
+            console.log("[Web2API Bridge] Found and clicking model menu item:", itemText);
+            item.click();
+            await new Promise((r) => setTimeout(r, 300));
+            return true;
+          }
+        }
+
+        // Click outside if not found
+        document.body.click();
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+    return false;
+  }
+
   function findSendButton(inputEl) {
+    // Strictly matching send/submit/arrow buttons; NEVER matching sidebar "Search" button
     const btnSelectors = [
       'button[aria-label*="Send" i]',
       'button[aria-label*="发送" i]',
       'button[aria-label*="Submit" i]',
-      'button[aria-label*="Search" i]',
       'button[mattooltip*="Send" i]',
-      'button[mattooltip*="Search" i]',
+      'button[mattooltip*="Submit" i]',
       'button.send-button',
       'button[type="submit"]',
       'button:has(mat-icon[data-mat-icon-name="send"])',
       'button:has(mat-icon[data-mat-icon-name="arrow_forward"])',
-      'button:has(mat-icon[data-mat-icon-name="search"])'
+      'button:has(mat-icon[data-mat-icon-name="arrow_upward"])',
+      'button:has(svg[data-icon="send"])',
+      'button:has(svg[data-icon="arrow-up"])'
     ];
 
+    // Priority 1: Check inside or immediately adjacent to chat input container
     if (inputEl) {
-      const parentForm = inputEl.closest("form, mat-form-field, .input-area, .chat-box");
+      const parentForm = inputEl.closest("form, mat-form-field, .input-area, .chat-box, .input-container, discovery-engine-chat, .bottom-bar, .input-wrapper") || inputEl.parentElement;
       if (parentForm) {
         for (const sel of btnSelectors) {
           const btn = parentForm.querySelector(sel);
-          if (btn && isVisible(btn) && !btn.disabled) return btn;
+          if (btn && isVisible(btn) && !btn.disabled && !isNavigationOrSidebar(btn)) return btn;
         }
       }
     }
 
+    // Priority 2: Deep search across page, strictly excluding sidebar / navigation
     for (const sel of btnSelectors) {
       const btns = queryDeep(sel);
       for (const b of btns) {
-        if (isVisible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true") {
+        if (!isNavigationOrSidebar(b) && isVisible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true") {
           return b;
         }
       }
@@ -432,8 +522,15 @@
   }
 
   // 3. Web Page DOM Interaction & Prompt Dispatch
-  async function handlePromptRequest(reqId, prompt) {
-    // A. Locate Prompt Input Area
+  async function handlePromptRequest(reqId, prompt, model) {
+    // A. Ensure Gemini 4 Hydrogen or requested model is selected in web dropdown
+    try {
+      await ensureModelSelected(model || "hydrogen");
+    } catch (e) {
+      console.warn("[Web2API Bridge] Error selecting model:", e);
+    }
+
+    // B. Locate Prompt Input Area
     const inputArea = await findChatInput(3500);
 
     // Snapshot existing model response count before submitting
@@ -640,7 +737,7 @@
           activeReqId = data.id;
           setStatus("busy", `Web2API: Answering request...`);
           try {
-            await handlePromptRequest(data.id, data.prompt);
+            await handlePromptRequest(data.id, data.prompt, data.model);
           } catch (err) {
             console.error("[Web2API Bridge] Error processing prompt:", err);
             await sendChunk(data.id, "", true, err.message || "Failed to generate reply");
