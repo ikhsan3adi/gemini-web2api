@@ -76,7 +76,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	if a.Bridge != nil && a.Bridge.IsConnected() {
 		a.Logf("Routing chat completion through active browser bridge (%s)", a.Bridge.TabName())
 
-		if req.Stream && (len(req.Tools) == 0 || isToolNone) {
+		if req.Stream {
 			if !startSSE(w) {
 				return
 			}
@@ -97,7 +97,32 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = writeSSEData(w, firstChunk)
 
+			// Keepalive ticker flushes SSE comments every 8s to prevent client connection timeout
+			stopKeepalive := make(chan struct{})
+			keepaliveTicker := time.NewTicker(8 * time.Second)
+			go func() {
+				for {
+					select {
+					case <-keepaliveTicker.C:
+						_ = writeSSEComment(w, "keepalive")
+					case <-stopKeepalive:
+						keepaliveTicker.Stop()
+						return
+					case <-r.Context().Done():
+						keepaliveTicker.Stop()
+						return
+					}
+				}
+			}()
+
+			var fullText strings.Builder
+			hasTools := len(req.Tools) > 0 && !isToolNone
+
 			emitErr := a.Bridge.GenerateStream(r.Context(), prompt, resolved.Name, func(delta string) error {
+				if hasTools {
+					fullText.WriteString(delta)
+					return nil
+				}
 				chunk := models.OpenAIChatResponse{
 					ID:      cid,
 					Object:  "chat.completion.chunk",
@@ -115,23 +140,53 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				}
 				return writeSSEData(w, chunk)
 			})
+			close(stopKeepalive)
 
 			if emitErr == nil {
-				stopReason := "stop"
-				endChunk := models.OpenAIChatResponse{
-					ID:      cid,
-					Object:  "chat.completion.chunk",
-					Created: time.Now().Unix(),
-					Model:   resolved.Name,
-					Choices: []models.OpenAIChoice{
-						{
-							Index:        0,
-							Delta:        &models.OpenAIMessage{},
-							FinishReason: &stopReason,
+				if hasTools {
+					cleanText, toolCalls := format.ParseToolCalls(fullText.String())
+					msg := models.OpenAIMessage{
+						Content: cleanText,
+					}
+					if cleanText == "" {
+						msg.Content = nil
+					}
+					stopReason := "stop"
+					if len(toolCalls) > 0 {
+						msg.ToolCalls = toolCalls
+						stopReason = "tool_calls"
+					}
+					endChunk := models.OpenAIChatResponse{
+						ID:      cid,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   resolved.Name,
+						Choices: []models.OpenAIChoice{
+							{
+								Index:        0,
+								Delta:        &msg,
+								FinishReason: &stopReason,
+							},
 						},
-					},
+					}
+					_ = writeSSEData(w, endChunk)
+				} else {
+					stopReason := "stop"
+					endChunk := models.OpenAIChatResponse{
+						ID:      cid,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   resolved.Name,
+						Choices: []models.OpenAIChoice{
+							{
+								Index:        0,
+								Delta:        &models.OpenAIMessage{},
+								FinishReason: &stopReason,
+							},
+						},
+					}
+					_ = writeSSEData(w, endChunk)
 				}
-				_ = writeSSEData(w, endChunk)
 				_ = writeSSEDone(w)
 			} else {
 				a.Logf("Bridge chat stream error: %v", emitErr)
