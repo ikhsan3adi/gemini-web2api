@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gemini Cookie Exporter</title>
+  <style>
+    body {
+      width: 380px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 16px;
+      color: #1f2937;
+      background: #f9fafb;
+    }
+    h2 {
+      margin-top: 0;
+      margin-bottom: 12px;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 9999px;
+      background: #e0f2fe;
+      color: #0369a1;
+    }
+    .status {
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+    .status.success {
+      background: #ecfdf5;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+    }
+    .status.warn {
+      background: #fffbeb;
+      color: #92400e;
+      border: 1px solid #fde68a;
+    }
+    .status.error {
+      background: #fef2f2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+    }
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      height: 140px;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      background: #ffffff;
+      resize: vertical;
+      margin-bottom: 12px;
+    }
+    .btn-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    button {
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      border-radius: 6px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s ease;
+    }
+    button.primary {
+      background: #2563eb;
+      color: #ffffff;
+    }
+    button.primary:hover {
+      background: #1d4ed8;
+    }
+    button.secondary {
+      background: #ffffff;
+      color: #374151;
+      border-color: #d1d5db;
+    }
+    button.secondary:hover {
+      background: #f3f4f6;
+    }
+    .footer {
+      margin-top: 12px;
+      font-size: 11px;
+      color: #6b7280;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h2>Gemini Web2API Bridge <span class="badge" id="envBadge">Checking...</span></h2>
+
+  <div id="bridgeBox" class="status warn" style="margin-bottom: 8px;">
+    <strong>Live Web Bridge:</strong> <span id="bridgeStatusText">Checking http://localhost:8081...</span>
+  </div>
+
+  <div id="statusBox" class="status warn">Checking session cookies...</div>
+
+  <textarea id="output" readonly placeholder="Cookie data will appear here..."></textarea>
+
+  <div class="btn-group">
+    <button id="copyJsonBtn" class="primary">Copy as cookie.json</button>
+    <button id="downloadJsonBtn" class="secondary">Download cookie.json</button>
+    <button id="copyTxtBtn" class="secondary">Copy as single-line cookie.txt</button>
+  </div>
+
+  <div class="footer">
+    Live Bridge active on gemini.google.com and vertexaisearch.cloud.google.com
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
