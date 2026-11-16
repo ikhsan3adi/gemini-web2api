@@ -359,19 +359,38 @@
   }
 
   function findModelTriggerElement() {
-    // Strategy 1: Explicit Angular Material / MDC menu trigger or button with exact "Auto" or model name
+    // Strategy 1: Look next to the mic icon (In Vertex AI Search, Auto is right next to mic!)
+    const micIcons = queryDeep('mat-icon, [data-mat-icon-name="mic"], button[aria-label*="mic" i], [data-icon*="mic"]');
+    for (const mic of micIcons) {
+      if (isNavigationOrSidebar(mic)) continue;
+      const t = (mic.innerText || mic.textContent || "").trim().toLowerCase();
+      const n = (mic.getAttribute("data-mat-icon-name") || "").toLowerCase();
+      if (t === "mic" || n === "mic") {
+        const micBtn = mic.closest('button, [role="button"]') || mic;
+        let sib = micBtn.previousElementSibling;
+        while (sib) {
+          const sText = (sib.innerText || sib.textContent || "").trim().toLowerCase();
+          if (/auto|hydrogen|gemini|carbon|argon|flash|pro/i.test(sText)) {
+            return sib.closest('button, [role="button"], [aria-haspopup], mat-select, div') || sib;
+          }
+          sib = sib.previousElementSibling;
+        }
+      }
+    }
+
+    // Strategy 2: Explicit Angular Material / MDC menu trigger or button with exact "Auto" or model name
     const candidates = queryDeep('button, [role="button"], [role="combobox"], [aria-haspopup], mat-select, .mat-mdc-menu-trigger, [class*="model-selector"], [class*="model-picker"]');
     for (const el of candidates) {
       if (isNavigationOrSidebar(el)) continue;
       const t = (el.innerText || el.textContent || "").trim();
       // Strictly match "Auto", "Auto keyboard_arrow_down", "Auto ∨", "Hydrogen", etc.
       // Must NOT match broad containers like .bottom-bar that have multiple buttons!
-      if (/^(auto|hydrogen|gemini|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
+      if (/^(auto|hydrogen|gemini|gemini\s*4\s*hydrogen|carbon|argon|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
         return el;
       }
     }
 
-    // Strategy 2: Look for dropdown arrow icon near text "Auto"
+    // Strategy 3: Look for dropdown arrow icon near text "Auto"
     const arrowIcons = queryDeep('mat-icon, svg, [data-icon]');
     for (const icon of arrowIcons) {
       if (isNavigationOrSidebar(icon)) continue;
@@ -383,15 +402,15 @@
       ) {
         const btn = icon.closest('button, [role="button"], [aria-haspopup], mat-select') || icon.parentElement;
         if (btn && isVisible(btn) && !isNavigationOrSidebar(btn)) {
-          const btnTxt = (btn.innerText || btn.textContent || "").trim();
-          if (/^auto(\s|$)/i.test(btnTxt)) {
+          const btnTxt = (btn.innerText || btn.textContent || "").trim().toLowerCase();
+          if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)/i.test(btnTxt)) {
             return btn;
           }
         }
       }
     }
 
-    // Strategy 3: Leaf element with exact text "Auto"
+    // Strategy 4: Leaf element with exact text "Auto"
     const allEls = queryDeep('button, [role="button"], span, div');
     for (const el of allEls) {
       if (isNavigationOrSidebar(el)) continue;
@@ -403,6 +422,30 @@
       }
     }
 
+    return null;
+  }
+
+  function findModelOptionInDOM(targetKeywords, excludeEl) {
+    const allEls = queryDeep("*");
+    for (const el of allEls) {
+      if (isNavigationOrSidebar(el)) continue;
+      // Skip large container elements; match leaf or near-leaf menu items
+      if (el.children.length > 3) continue;
+
+      const txt = (el.innerText || el.textContent || "").trim();
+      if (!txt) continue;
+
+      const lower = txt.toLowerCase();
+      if (targetKeywords.some((kw) => lower.includes(kw))) {
+        const clickable = el.closest("button, [role='button'], [role='menuitem'], [role='option'], li, div") || el;
+        if (excludeEl && (clickable === excludeEl || excludeEl.contains(clickable))) {
+          continue;
+        }
+        if (isVisible(clickable)) {
+          return clickable;
+        }
+      }
+    }
     return null;
   }
 
@@ -419,56 +462,49 @@
     }
 
     const trigger = findModelTriggerElement();
+    if (trigger) {
+      const currentText = (trigger.innerText || trigger.textContent || "").trim().toLowerCase();
+      if (targetKeywords.some((kw) => currentText.includes(kw))) {
+        console.log("[Web2API Bridge] Hydrogen model is already selected on trigger:", currentText);
+        modelBtn.textContent = "✅ Hydrogen";
+        return true;
+      }
+    }
+
+    // Check if dropdown is already open right now (e.g. from user click or previous attempt)
+    let option = findModelOptionInDOM(targetKeywords, trigger);
+    if (option) {
+      console.log("[Web2API Bridge] Menu already open, clicking model option directly:", option);
+      simulateClick(option);
+      await new Promise((r) => setTimeout(r, 200));
+      modelBtn.textContent = "✅ Gemini 4 Hydrogen";
+      return true;
+    }
+
     if (!trigger) {
       console.warn("[Web2API Bridge] Could not find model selector dropdown trigger");
       return false;
     }
 
-    const currentText = (trigger.innerText || trigger.textContent || "").trim().toLowerCase();
-    if (targetKeywords.some((kw) => currentText.includes(kw))) {
-      console.log("[Web2API Bridge] Hydrogen model is already selected:", currentText);
-      return true;
-    }
-
-    console.log("[Web2API Bridge] Triggering model dropdown (current text:", currentText, ")");
+    console.log("[Web2API Bridge] Triggering model dropdown via trigger element:", trigger);
     simulateClick(trigger);
 
-    // Poll for menu overlay up to 2500ms
+    // Poll for menu overlay or items up to 3000ms
     const start = Date.now();
-    let detectedOptions = [];
-    while (Date.now() - start < 2500) {
-      await new Promise((r) => setTimeout(r, 120));
-      const menuItems = queryDeep(
-        ".cdk-overlay-container [role='menuitem'], .cdk-overlay-container [role='option'], " +
-        ".cdk-overlay-container button, .cdk-overlay-container .mat-mdc-menu-item, " +
-        ".mat-mdc-menu-item, .mat-menu-item, mat-list-item, [role='menuitem'], [role='option']"
-      );
-
-      detectedOptions = [];
-      for (const item of menuItems) {
-        if (isNavigationOrSidebar(item)) continue;
-        const itemText = (item.innerText || item.textContent || "").trim();
-        if (itemText && !detectedOptions.includes(itemText)) {
-          detectedOptions.push(itemText);
-        }
-
-        const lower = itemText.toLowerCase();
-        if (targetKeywords.some((kw) => lower.includes(kw))) {
-          console.log("[Web2API Bridge] Found and selecting model menu item:", itemText);
-          simulateClick(item);
-          await new Promise((r) => setTimeout(r, 250));
-          modelBtn.textContent = "✅ " + itemText;
-          return true;
-        }
+    while (Date.now() - start < 3000) {
+      await new Promise((r) => setTimeout(r, 100));
+      option = findModelOptionInDOM(targetKeywords, trigger);
+      if (option) {
+        console.log("[Web2API Bridge] Found model menu option, clicking:", option);
+        simulateClick(option);
+        await new Promise((r) => setTimeout(r, 250));
+        modelBtn.textContent = "✅ Gemini 4 Hydrogen";
+        return true;
       }
     }
 
-    console.warn("[Web2API Bridge] Target model not found in dropdown. Detected options on page:", detectedOptions);
-    if (detectedOptions.length > 0) {
-      modelBtn.title = "Available models on page: " + detectedOptions.join(" | ");
-    }
-
-    // Click outside if not matched
+    console.warn("[Web2API Bridge] Target model not found in dropdown");
+    // Click outside to close menu if not matched
     document.body.click();
     return false;
   }
@@ -478,9 +514,9 @@
     const t = (btn.innerText || btn.textContent || "").trim().toLowerCase();
     const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
     const tip = (btn.getAttribute("mattooltip") || "").toLowerCase();
-    if (/^auto(\s|$)/i.test(t) || aria.includes("auto") || tip.includes("auto")) return true;
+    if (/auto|hydrogen|carbon|argon|flash|pro/i.test(t) || /auto|hydrogen/i.test(aria) || /auto|hydrogen/i.test(tip)) return true;
     if (t === "mic" || aria.includes("mic") || tip.includes("mic")) return true;
-    if (t.includes("keyboard_arrow_down") && /auto/i.test(t)) return true;
+    if (t.includes("keyboard_arrow_down") && /auto|hydrogen/i.test(t)) return true;
     return false;
   }
 

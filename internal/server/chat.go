@@ -72,6 +72,91 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	strChoice, isStr := req.ToolChoice.(string)
 	isToolNone := isStr && strChoice == "none"
 
+	// Intercept automatic client title / topic generation requests (e.g. WorkBuddy)
+	// and fulfill them instantly without tying up the browser tab or polluting chat history.
+	if isTitle, sessionText := isTitleSummaryRequest(prompt); isTitle {
+		titleJSON := generateFastTitleJSON(sessionText)
+		a.Logf("Fast-tracking client title generation request locally: %s", titleJSON)
+
+		if req.Stream {
+			if !startSSE(w) {
+				return
+			}
+			firstChunk := models.OpenAIChatResponse{
+				ID:      cid,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resolved.Name,
+				Choices: []models.OpenAIChoice{
+					{
+						Index: 0,
+						Delta: &models.OpenAIMessage{
+							Role: "assistant",
+						},
+						FinishReason: nil,
+					},
+				},
+			}
+			_ = writeSSEData(w, firstChunk)
+
+			contentChunk := models.OpenAIChatResponse{
+				ID:      cid,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resolved.Name,
+				Choices: []models.OpenAIChoice{
+					{
+						Index: 0,
+						Delta: &models.OpenAIMessage{
+							Content: titleJSON,
+						},
+						FinishReason: nil,
+					},
+				},
+			}
+			_ = writeSSEData(w, contentChunk)
+
+			stopReason := "stop"
+			endChunk := models.OpenAIChatResponse{
+				ID:      cid,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resolved.Name,
+				Choices: []models.OpenAIChoice{
+					{
+						Index:        0,
+						Delta:        &models.OpenAIMessage{},
+						FinishReason: &stopReason,
+					},
+				},
+			}
+			_ = writeSSEData(w, endChunk)
+			_ = writeSSEDone(w)
+			return
+		}
+
+		finish := "stop"
+		msg := models.OpenAIMessage{
+			Role:    "assistant",
+			Content: titleJSON,
+		}
+		resp := models.OpenAIChatResponse{
+			ID:      cid,
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   resolved.Name,
+			Choices: []models.OpenAIChoice{
+				{
+					Index:        0,
+					Message:      &msg,
+					FinishReason: &finish,
+				},
+			},
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	// Check if an authenticated browser tab is connected via the extension bridge.
 	if a.Bridge != nil && a.Bridge.IsConnected() {
 		a.Logf("Routing chat completion through active browser bridge (%s)", a.Bridge.TabName())
@@ -117,44 +202,57 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 			var fullText strings.Builder
 			hasTools := len(req.Tools) > 0 && !isToolNone
+			isBufferingToolCall := false
 
 			emitErr := a.Bridge.GenerateStream(r.Context(), prompt, resolved.Name, func(delta string) error {
+				fullText.WriteString(delta)
+				current := fullText.String()
+
+				// If tools are defined, check whether model is emitting a structured tool call block.
+				// If so, buffer the tool call block so it can be parsed upon completion.
 				if hasTools {
-					fullText.WriteString(delta)
-					return nil
+					trimmed := strings.TrimSpace(current)
+					if strings.HasPrefix(trimmed, "```tool_call") || strings.HasPrefix(trimmed, `{"name"`) || strings.Contains(current, "```tool_call") {
+						isBufferingToolCall = true
+						return nil
+					}
 				}
-				chunk := models.OpenAIChatResponse{
-					ID:      cid,
-					Object:  "chat.completion.chunk",
-					Created: time.Now().Unix(),
-					Model:   resolved.Name,
-					Choices: []models.OpenAIChoice{
-						{
-							Index: 0,
-							Delta: &models.OpenAIMessage{
-								Content: delta,
+
+				// Otherwise, stream text chunks in real-time to the client so WorkBuddy renders live tokens
+				// and prevents client-side idle timeouts ("User Cancelled").
+				if !isBufferingToolCall {
+					chunk := models.OpenAIChatResponse{
+						ID:      cid,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   resolved.Name,
+						Choices: []models.OpenAIChoice{
+							{
+								Index: 0,
+								Delta: &models.OpenAIMessage{
+									Content: delta,
+								},
+								FinishReason: nil,
 							},
-							FinishReason: nil,
 						},
-					},
+					}
+					return writeSSEData(w, chunk)
 				}
-				return writeSSEData(w, chunk)
+				return nil
 			})
 			close(stopKeepalive)
 
 			if emitErr == nil {
 				if hasTools {
 					cleanText, toolCalls := format.ParseToolCalls(fullText.String())
-					msg := models.OpenAIMessage{
-						Content: cleanText,
-					}
-					if cleanText == "" {
-						msg.Content = nil
-					}
+					msg := models.OpenAIMessage{}
 					stopReason := "stop"
 					if len(toolCalls) > 0 {
 						msg.ToolCalls = toolCalls
 						stopReason = "tool_calls"
+					}
+					if isBufferingToolCall && cleanText != "" {
+						msg.Content = cleanText
 					}
 					endChunk := models.OpenAIChatResponse{
 						ID:      cid,
