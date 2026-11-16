@@ -29,7 +29,7 @@ This is a complete Go rewrite of the original [Python gemini-web2api](https://gi
 
 ### 1. Download Pre-built Binary (Recommended)
 
-Download the pre-compiled binary for your OS (Linux, macOS, Windows) from the [Releases](https://github.com/ikhsan3adi/gemini-web2api/releases) page:
+Download the pre-compiled binary for your OS (Linux, macOS, Windows) from the [Releases](https://github.com/Hau04/gemini-web2api/releases) page:
 
 **Linux / macOS:**
 
@@ -49,7 +49,7 @@ chmod +x gemini-web2api
 If you have Go 1.22+ installed on your system:
 
 ```bash
-go install github.com/ikhsan3adi/gemini-web2api@latest
+go install github.com/Hau04/gemini-web2api@latest
 ```
 
 This compiles and places the binary directly into your `$GOPATH/bin` (or `%USERPROFILE%\go\bin`). Run it from anywhere:
@@ -63,7 +63,7 @@ gemini-web2api --port 8081
 Prerequisites: Go 1.22+
 
 ```bash
-git clone https://github.com/ikhsan3adi/gemini-web2api.git
+git clone https://github.com/Hau04/gemini-web2api.git
 cd gemini-web2api
 ```
 
@@ -96,8 +96,10 @@ cp config.example.json config.json
 #### Option A: Run pre-built GHCR Image (No git clone needed)
 
 ```bash
-docker run -d --name gemini-web2api -p 8081:8081 ghcr.io/ikhsan3adi/gemini-web2api:latest
+docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.json ghcr.io/hau04/gemini-web2api:latest
 ```
+
+*(If you do not have a `config.json`, simply omit `-v ./config.json:/app/config.json` to run with default settings).*
 
 #### Option B: Build and run locally
 
@@ -112,6 +114,8 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
+> **Note**: If you configure a cookie file in `config.json` (e.g. `"cookie_file": "/app/cookie.txt"`), remember to mount your cookie file as well: `-v ./cookie.txt:/app/cookie.txt`.
+>
 > **Note**: If you get empty responses (`content: null`) with Docker's default bridge network, switch to host networking: `docker run --network host ...` or add `network_mode: host` in your compose file. This is caused by Gemini's upstream rejecting requests from certain Docker NAT IP ranges.
 
 ## Client Configuration

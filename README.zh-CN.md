@@ -30,7 +30,7 @@
 
 ### 1.下载预构建的二进制文件（推荐）
 
-从以下地址下载适用于您的操作系统（Linux、macOS、Windows）的预编译二进制文件[发布](https://github.com/ikhsan3adi/gemini-web2api/releases)页：
+从以下地址下载适用于您的操作系统（Linux、macOS、Windows）的预编译二进制文件[发布](https://github.com/Hau04/gemini-web2api/releases)页：
 
 **Linux / macOS：**
 
@@ -50,7 +50,7 @@ chmod +x gemini-web2api
 如果您的系统上安装了 Go 1.22+：
 
 ```bash
-go install github.com/ikhsan3adi/gemini-web2api@latest
+go install github.com/Hau04/gemini-web2api@latest
 ```
 
 这将编译二进制文件并将其直接放入您的`$GOPATH/bin`（或者`%USERPROFILE%\go\bin`）。从任何地方运行它：
@@ -64,7 +64,7 @@ gemini-web2api --port 8081
 先决条件：Go 1.22+
 
 ```bash
-git clone https://github.com/ikhsan3adi/gemini-web2api.git
+git clone https://github.com/Hau04/gemini-web2api.git
 cd gemini-web2api
 ```
 
@@ -97,8 +97,10 @@ cp config.example.json config.json
 #### 选项 A：运行预构建的 GHCR 映像（无需 git 克隆）
 
 ```bash
-docker run -d --name gemini-web2api -p 8081:8081 ghcr.io/ikhsan3adi/gemini-web2api:latest
+docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.json ghcr.io/hau04/gemini-web2api:latest
 ```
+
+*（若不需要额外配置，可省略挂载参数 `-v ./config.json:/app/config.json` 使用默认配置运行）。*
 
 #### 选项 B：本地构建并运行
 
@@ -113,7 +115,9 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
-> **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
+> **注意**：如果在 `config.json` 中配置了 Cookie 文件路径（如 `"cookie_file": "/app/cookie.txt"`），运行容器时记得同时挂载 Cookie 文件：`-v ./cookie.txt:/app/cookie.txt`。
+>
+> **注意**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
 
 ## 客户端配置
 
