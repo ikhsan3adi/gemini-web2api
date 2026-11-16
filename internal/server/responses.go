@@ -109,10 +109,20 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Extra:       resolved.Extra,
 	}
 
-	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-		return
+	var text string
+	if a.Bridge != nil && a.Bridge.IsConnected() {
+		a.Logf("Routing responses request through active browser bridge (%s)", a.Bridge.TabName())
+		text, err = a.Bridge.Generate(r.Context(), prompt, resolved.Name)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+			return
+		}
+	} else {
+		text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+			return
+		}
 	}
 
 	strChoice, isStr := toolChoice.(string)

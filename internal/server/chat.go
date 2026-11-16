@@ -6,12 +6,41 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
+
+const toolCallFence = "```tool_call"
+
+// partialToolFenceSuffixLen returns the length of the longest suffix of s
+// that is a proper prefix of "```tool_call", so streaming holds at most 11 bytes
+// while confirming whether backticks begin a structured tool_call block.
+func partialToolFenceSuffixLen(s string) int {
+	maxCheck := len(toolCallFence) - 1
+	if len(s) < maxCheck {
+		maxCheck = len(s)
+	}
+	for k := maxCheck; k >= 1; k-- {
+		if strings.HasSuffix(s, toolCallFence[:k]) {
+			return k
+		}
+	}
+	return 0
+}
+
+func indexToolCalls(toolCalls []models.OpenAIToolCall) []models.OpenAIToolCall {
+	indexed := make([]models.OpenAIToolCall, len(toolCalls))
+	for i, tc := range toolCalls {
+		idx := i
+		tc.Index = &idx
+		indexed[i] = tc
+	}
+	return indexed
+}
 
 func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -90,7 +119,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				Choices: []models.OpenAIChoice{
 					{
 						Index: 0,
-						Delta: &models.OpenAIMessage{
+						Delta: &models.OpenAIDelta{
 							Role: "assistant",
 						},
 						FinishReason: nil,
@@ -107,7 +136,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				Choices: []models.OpenAIChoice{
 					{
 						Index: 0,
-						Delta: &models.OpenAIMessage{
+						Delta: &models.OpenAIDelta{
 							Content: titleJSON,
 						},
 						FinishReason: nil,
@@ -125,7 +154,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				Choices: []models.OpenAIChoice{
 					{
 						Index:        0,
-						Delta:        &models.OpenAIMessage{},
+						Delta:        &models.OpenAIDelta{},
 						FinishReason: &stopReason,
 					},
 				},
@@ -165,6 +194,19 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			if !startSSE(w) {
 				return
 			}
+
+			var sseMu sync.Mutex
+			safeWriteSSE := func(data any) error {
+				sseMu.Lock()
+				defer sseMu.Unlock()
+				return writeSSEData(w, data)
+			}
+			safeWriteDone := func() error {
+				sseMu.Lock()
+				defer sseMu.Unlock()
+				return writeSSEDone(w)
+			}
+
 			firstChunk := models.OpenAIChatResponse{
 				ID:      cid,
 				Object:  "chat.completion.chunk",
@@ -173,20 +215,23 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				Choices: []models.OpenAIChoice{
 					{
 						Index: 0,
-						Delta: &models.OpenAIMessage{
+						Delta: &models.OpenAIDelta{
 							Role: "assistant",
 						},
 						FinishReason: nil,
 					},
 				},
 			}
-			_ = writeSSEData(w, firstChunk)
+			_ = safeWriteSSE(firstChunk)
 
-			// Keepalive ticker flushes empty delta chunks every 5s to keep client stream parser active
-			// and prevent client-side idle timeouts ("User Cancelled").
+			// Keepalive ticker flushes empty delta chunks ({}) every 5s with mutex synchronization
+			// to keep client stream parsers active and prevent idle timeouts.
 			stopKeepalive := make(chan struct{})
+			doneKeepalive := make(chan struct{})
 			keepaliveTicker := time.NewTicker(5 * time.Second)
 			go func() {
+				defer close(doneKeepalive)
+				defer keepaliveTicker.Stop()
 				for {
 					select {
 					case <-keepaliveTicker.C:
@@ -198,16 +243,14 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 							Choices: []models.OpenAIChoice{
 								{
 									Index: 0,
-									Delta: &models.OpenAIMessage{},
+									Delta: &models.OpenAIDelta{},
 								},
 							},
 						}
-						_ = writeSSEData(w, pingChunk)
+						_ = safeWriteSSE(pingChunk)
 					case <-stopKeepalive:
-						keepaliveTicker.Stop()
 						return
 					case <-r.Context().Done():
-						keepaliveTicker.Stop()
 						return
 					}
 				}
@@ -216,71 +259,150 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			var fullText strings.Builder
 			hasTools := len(req.Tools) > 0 && !isToolNone
 			isBufferingToolCall := false
+			pending := ""
+			streamedAny := false
+
+			emitContent := func(text string) error {
+				if text == "" {
+					return nil
+				}
+				streamedAny = true
+				chunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index: 0,
+							Delta: &models.OpenAIDelta{
+								Content: text,
+							},
+							FinishReason: nil,
+						},
+					},
+				}
+				return safeWriteSSE(chunk)
+			}
 
 			emitErr := a.Bridge.GenerateStream(r.Context(), prompt, resolved.Name, func(delta string) error {
 				fullText.WriteString(delta)
-				current := fullText.String()
 
-				// If tools are defined, check whether model is emitting a structured tool call block.
-				// If so, buffer the tool call block so it can be parsed upon completion.
-				if hasTools {
-					trimmed := strings.TrimSpace(current)
-					if strings.HasPrefix(trimmed, "```tool_call") || strings.HasPrefix(trimmed, `{"name"`) || strings.Contains(current, "```tool_call") {
-						isBufferingToolCall = true
-						return nil
-					}
+				if !hasTools {
+					return emitContent(delta)
 				}
 
-				// Otherwise, stream text chunks in real-time to the client so WorkBuddy renders live tokens
-				// and prevents client-side idle timeouts ("User Cancelled").
-				if !isBufferingToolCall {
-					chunk := models.OpenAIChatResponse{
-						ID:      cid,
-						Object:  "chat.completion.chunk",
-						Created: time.Now().Unix(),
-						Model:   resolved.Name,
-						Choices: []models.OpenAIChoice{
-							{
-								Index: 0,
-								Delta: &models.OpenAIMessage{
-									Content: delta,
-								},
-								FinishReason: nil,
-							},
-						},
+				if isBufferingToolCall {
+					return nil
+				}
+
+				pending += delta
+
+				// Detect start of a ```tool_call block; flush any leading prose before the fence
+				if idx := strings.Index(pending, toolCallFence); idx != -1 {
+					isBufferingToolCall = true
+					if idx > 0 {
+						leading := pending[:idx]
+						pending = ""
+						return emitContent(leading)
 					}
-					return writeSSEData(w, chunk)
+					pending = ""
+					return nil
+				}
+
+				// Hold only a tiny trailing suffix if it could be the opening of ```tool_call
+				hold := partialToolFenceSuffixLen(pending)
+				if len(pending) > hold {
+					toEmit := pending[:len(pending)-hold]
+					pending = pending[len(pending)-hold:]
+					return emitContent(toEmit)
 				}
 				return nil
 			})
+
 			close(stopKeepalive)
+			<-doneKeepalive
 
 			if emitErr == nil {
 				if hasTools {
-					cleanText, toolCalls := format.ParseToolCalls(fullText.String())
-					msg := models.OpenAIMessage{}
-					stopReason := "stop"
-					if len(toolCalls) > 0 {
-						msg.ToolCalls = toolCalls
-						stopReason = "tool_calls"
-					}
-					if isBufferingToolCall && cleanText != "" {
-						msg.Content = cleanText
-					}
-					endChunk := models.OpenAIChatResponse{
-						ID:      cid,
-						Object:  "chat.completion.chunk",
-						Created: time.Now().Unix(),
-						Model:   resolved.Name,
-						Choices: []models.OpenAIChoice{
-							{
-								Index:        0,
-								Delta:        &msg,
-								FinishReason: &stopReason,
+					if isBufferingToolCall {
+						cleanText, toolCalls := format.ParseToolCalls(fullText.String())
+						if len(toolCalls) > 0 {
+							tcChunk := models.OpenAIChatResponse{
+								ID:      cid,
+								Object:  "chat.completion.chunk",
+								Created: time.Now().Unix(),
+								Model:   resolved.Name,
+								Choices: []models.OpenAIChoice{
+									{
+										Index: 0,
+										Delta: &models.OpenAIDelta{
+											ToolCalls: indexToolCalls(toolCalls),
+										},
+										FinishReason: nil,
+									},
+								},
+							}
+							_ = safeWriteSSE(tcChunk)
+
+							stopReason := "tool_calls"
+							endChunk := models.OpenAIChatResponse{
+								ID:      cid,
+								Object:  "chat.completion.chunk",
+								Created: time.Now().Unix(),
+								Model:   resolved.Name,
+								Choices: []models.OpenAIChoice{
+									{
+										Index:        0,
+										Delta:        &models.OpenAIDelta{},
+										FinishReason: &stopReason,
+									},
+								},
+							}
+							_ = safeWriteSSE(endChunk)
+						} else {
+							// Fence did not contain valid JSON tool_call; flush full text if nothing was streamed
+							if !streamedAny && cleanText != "" {
+								_ = emitContent(cleanText)
+							}
+							stopReason := "stop"
+							endChunk := models.OpenAIChatResponse{
+								ID:      cid,
+								Object:  "chat.completion.chunk",
+								Created: time.Now().Unix(),
+								Model:   resolved.Name,
+								Choices: []models.OpenAIChoice{
+									{
+										Index:        0,
+										Delta:        &models.OpenAIDelta{},
+										FinishReason: &stopReason,
+									},
+								},
+							}
+							_ = safeWriteSSE(endChunk)
+						}
+					} else {
+						// Flush any held trailing characters (e.g. a normal markdown closing fence)
+						if pending != "" {
+							_ = emitContent(pending)
+							pending = ""
+						}
+						stopReason := "stop"
+						endChunk := models.OpenAIChatResponse{
+							ID:      cid,
+							Object:  "chat.completion.chunk",
+							Created: time.Now().Unix(),
+							Model:   resolved.Name,
+							Choices: []models.OpenAIChoice{
+								{
+									Index:        0,
+									Delta:        &models.OpenAIDelta{},
+									FinishReason: &stopReason,
+								},
 							},
-						},
+						}
+						_ = safeWriteSSE(endChunk)
 					}
-					_ = writeSSEData(w, endChunk)
 				} else {
 					stopReason := "stop"
 					endChunk := models.OpenAIChatResponse{
@@ -291,16 +413,37 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 						Choices: []models.OpenAIChoice{
 							{
 								Index:        0,
-								Delta:        &models.OpenAIMessage{},
+								Delta:        &models.OpenAIDelta{},
 								FinishReason: &stopReason,
 							},
 						},
 					}
-					_ = writeSSEData(w, endChunk)
+					_ = safeWriteSSE(endChunk)
 				}
-				_ = writeSSEDone(w)
+				_ = safeWriteDone()
 			} else {
 				a.Logf("Bridge chat stream error: %v", emitErr)
+				if r.Context().Err() == nil {
+					if !streamedAny {
+						_ = emitContent(fmt.Sprintf("[Bridge Error] %v", emitErr))
+					}
+					stopReason := "stop"
+					endChunk := models.OpenAIChatResponse{
+						ID:      cid,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   resolved.Name,
+						Choices: []models.OpenAIChoice{
+							{
+								Index:        0,
+								Delta:        &models.OpenAIDelta{},
+								FinishReason: &stopReason,
+							},
+						},
+					}
+					_ = safeWriteSSE(endChunk)
+					_ = safeWriteDone()
+				}
 			}
 			return
 		}
@@ -363,7 +506,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			Choices: []models.OpenAIChoice{
 				{
 					Index: 0,
-					Delta: &models.OpenAIMessage{
+					Delta: &models.OpenAIDelta{
 						Role: "assistant",
 					},
 					FinishReason: nil,
@@ -381,7 +524,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				Choices: []models.OpenAIChoice{
 					{
 						Index: 0,
-						Delta: &models.OpenAIMessage{
+						Delta: &models.OpenAIDelta{
 							Content: delta,
 						},
 						FinishReason: nil,
@@ -401,7 +544,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				Choices: []models.OpenAIChoice{
 					{
 						Index:        0,
-						Delta:        &models.OpenAIMessage{},
+						Delta:        &models.OpenAIDelta{},
 						FinishReason: &stopReason,
 					},
 				},
@@ -446,6 +589,15 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		if !startSSE(w) {
 			return
 		}
+		delta := &models.OpenAIDelta{
+			Role: "assistant",
+		}
+		if text != "" {
+			delta.Content = text
+		}
+		if len(toolCalls) > 0 {
+			delta.ToolCalls = indexToolCalls(toolCalls)
+		}
 		chunk := models.OpenAIChatResponse{
 			ID:      cid,
 			Object:  "chat.completion.chunk",
@@ -454,12 +606,26 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			Choices: []models.OpenAIChoice{
 				{
 					Index:        0,
-					Delta:        &msg,
-					FinishReason: &finish,
+					Delta:        delta,
+					FinishReason: nil,
 				},
 			},
 		}
 		_ = writeSSEData(w, chunk)
+		endChunk := models.OpenAIChatResponse{
+			ID:      cid,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   resolved.Name,
+			Choices: []models.OpenAIChoice{
+				{
+					Index:        0,
+					Delta:        &models.OpenAIDelta{},
+					FinishReason: &finish,
+				},
+			},
+		}
+		_ = writeSSEData(w, endChunk)
 		_ = writeSSEDone(w)
 	} else {
 		promptTokens := len(prompt) / 4

@@ -32,6 +32,7 @@ type OpenAIFunction struct {
 }
 
 type OpenAIToolCall struct {
+	Index    *int                   `json:"index,omitempty"`
 	ID       string                 `json:"id"`
 	Type     string                 `json:"type"`
 	Function OpenAIToolCallFunction `json:"function"`
@@ -40,6 +41,12 @@ type OpenAIToolCall struct {
 type OpenAIToolCallFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+type OpenAIDelta struct {
+	Role      string           `json:"role,omitempty"`
+	Content   any              `json:"content,omitempty"`
+	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIChatResponse struct {
@@ -54,7 +61,7 @@ type OpenAIChatResponse struct {
 type OpenAIChoice struct {
 	Index        int            `json:"index"`
 	Message      *OpenAIMessage `json:"message,omitempty"`
-	Delta        *OpenAIMessage `json:"delta,omitempty"`
+	Delta        *OpenAIDelta   `json:"delta,omitempty"`
 	FinishReason *string        `json:"finish_reason"`
 }
 

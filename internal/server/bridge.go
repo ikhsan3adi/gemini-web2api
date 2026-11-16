@@ -20,6 +20,31 @@ func (a *App) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *App) handleBridgeHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if a.Bridge == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "bridge not initialized"})
+		return
+	}
+
+	var payload struct {
+		Tab      string `json:"tab"`
+		ClientID string `json:"client_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	tabName := payload.Tab
+	if tabName == "" {
+		tabName = r.URL.Query().Get("tab")
+	}
+	clientID := payload.ClientID
+	if clientID == "" {
+		clientID = r.URL.Query().Get("client")
+	}
+
+	a.Bridge.Heartbeat(tabName, clientID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (a *App) handleBridgePoll(w http.ResponseWriter, r *http.Request) {
 	if a.Bridge == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "bridge not initialized"})
@@ -30,8 +55,9 @@ func (a *App) handleBridgePoll(w http.ResponseWriter, r *http.Request) {
 	if tabName == "" {
 		tabName = "active-browser-tab"
 	}
+	clientID := r.URL.Query().Get("client")
 
-	req, err := a.Bridge.WaitForNextRequest(r.Context(), tabName, 20*time.Second)
+	req, err := a.Bridge.WaitForNextRequestForClient(r.Context(), tabName, clientID, 20*time.Second)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return

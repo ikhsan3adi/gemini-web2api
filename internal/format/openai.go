@@ -283,7 +283,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 		}
 
 		switch role {
-		case "system":
+		case "system", "developer":
 			parts = append(parts, fmt.Sprintf("[System instruction]: %s", contentStr))
 		case "assistant":
 			if len(msg.ToolCalls) > 0 {

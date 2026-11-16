@@ -78,7 +78,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 1. Identify active tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const url = tab && tab.url ? tab.url : "";
-  const isEnterprise = url.includes("vertexaisearch.cloud.google.com");
+  const isEnterprise = url.includes("vertexaisearch.cloud.google.com") || url.includes("business.gemini.google");
   const isGeminiWeb = url.includes("gemini.google.com");
 
   if (isEnterprise) {
@@ -94,6 +94,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     "google.com",
     ".google.com",
     "gemini.google.com",
+    "business.gemini.google",
     "cloud.google.com",
     ".cloud.google.com",
     "vertexaisearch.cloud.google.com"

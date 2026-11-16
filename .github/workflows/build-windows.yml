@@ -9,6 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Run Go & Extension Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run Go tests (with race detector)
+        run: go test -race -v ./...
+
+      - name: Run Browser Extension tests
+        run: |
+          node --check extension/net-hook.js
+          node --check extension/bridge.js
+          node --check extension/popup.js
+          node --test tests/extension.test.mjs
+
   build-windows:
     name: Build Windows (${{ matrix.goarch }})
     runs-on: ubuntu-latest
@@ -50,7 +72,7 @@ jobs:
 
   release-windows:
     name: Publish Windows Release
-    needs: build-windows
+    needs: [test, build-windows]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:

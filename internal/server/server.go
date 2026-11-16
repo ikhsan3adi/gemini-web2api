@@ -73,6 +73,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1beta/models/{target}", a.handleGoogleGenerate)
 
 	mux.HandleFunc("GET /bridge/status", a.handleBridgeStatus)
+	mux.HandleFunc("POST /bridge/heartbeat", a.handleBridgeHeartbeat)
 	mux.HandleFunc("GET /bridge/poll", a.handleBridgePoll)
 	mux.HandleFunc("POST /bridge/chunk", a.handleBridgeChunk)
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,29 +24,47 @@ type Chunk struct {
 	Error string `json:"error,omitempty"`
 }
 
+type inFlightEntry struct {
+	req        *Request
+	tabName    string
+	clientID   string
+	assignedAt time.Time
+	hasChunks  bool
+}
+
 type Hub struct {
-	mu            sync.Mutex
-	tabName       string
-	lastHeartbeat time.Time
-	pending       []*Request
-	inFlight      map[string]*Request
-	waiters       map[string]chan Chunk
-	pollNotify    chan struct{}
+	mu               sync.Mutex
+	seq              atomic.Uint64
+	tabName          string
+	lastHeartbeat    time.Time
+	clientHeartbeats map[string]time.Time
+	pending          []*Request
+	inFlight         map[string]*inFlightEntry
+	waiters          map[string]chan Chunk
+	pollNotify       chan struct{}
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		inFlight:   make(map[string]*Request),
-		waiters:    make(map[string]chan Chunk),
-		pollNotify: make(chan struct{}, 1),
+		clientHeartbeats: make(map[string]time.Time),
+		inFlight:         make(map[string]*inFlightEntry),
+		waiters:          make(map[string]chan Chunk),
+		pollNotify:       make(chan struct{}, 1),
 	}
 }
 
-// IsConnected returns true if a browser tab sent a poll/heartbeat within the last 45 seconds.
+// IsConnected returns true if a browser tab sent a poll/heartbeat within the last 45 seconds,
+// or if an active generation is still in flight within the 180s window.
 func (h *Hub) IsConnected() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return time.Since(h.lastHeartbeat) < 45*time.Second && h.tabName != ""
+	if h.tabName == "" {
+		return false
+	}
+	if time.Since(h.lastHeartbeat) < 45*time.Second {
+		return true
+	}
+	return len(h.inFlight) > 0 && time.Since(h.lastHeartbeat) < 180*time.Second
 }
 
 func (h *Hub) TabName() string {
@@ -55,33 +74,78 @@ func (h *Hub) TabName() string {
 }
 
 func (h *Hub) Touch(tabName string) {
+	h.Heartbeat(tabName, "")
+}
+
+// Heartbeat updates tab and client liveness timestamps.
+func (h *Hub) Heartbeat(tabName, clientID string) {
+	now := time.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if tabName != "" {
 		h.tabName = tabName
 	}
-	h.lastHeartbeat = time.Now()
+	if clientID != "" {
+		h.clientHeartbeats[clientID] = now
+	}
+	h.lastHeartbeat = now
 }
 
 // WaitForNextRequest blocks until a generation request is queued or timeout occurs.
 func (h *Hub) WaitForNextRequest(ctx context.Context, tabName string, timeout time.Duration) (*Request, error) {
-	h.Touch(tabName)
+	return h.WaitForNextRequestForClient(ctx, tabName, "", timeout)
+}
+
+// WaitForNextRequestForClient blocks until a generation request is queued or timeout occurs,
+// tracking the polling client ID to avoid duplicate dispatches across tabs.
+func (h *Hub) WaitForNextRequestForClient(ctx context.Context, tabName, clientID string, timeout time.Duration) (*Request, error) {
+	h.Heartbeat(tabName, clientID)
 
 	h.mu.Lock()
 	if len(h.pending) > 0 {
 		req := h.pending[0]
 		h.pending = h.pending[1:]
-		h.inFlight[req.ID] = req
+		h.inFlight[req.ID] = &inFlightEntry{
+			req:        req,
+			tabName:    tabName,
+			clientID:   clientID,
+			assignedAt: time.Now(),
+		}
 		h.mu.Unlock()
 		return req, nil
 	}
-	// If a previous request was dispatched but the tab reconnected/reloaded before completing it, re-dispatch it
-	for id, req := range h.inFlight {
-		if _, exists := h.waiters[id]; exists && time.Since(req.CreatedAt) > 4*time.Second {
+
+	// Only re-dispatch an orphaned in-flight request if zero chunks have been streamed yet
+	// AND its assigned tab appears to have reloaded or stopped heartbeating.
+	for id, entry := range h.inFlight {
+		if _, exists := h.waiters[id]; !exists {
+			delete(h.inFlight, id)
+			continue
+		}
+		if entry.hasChunks {
+			continue
+		}
+		orphaned := false
+		if clientID != "" && entry.clientID != "" {
+			if entry.clientID != clientID {
+				lastSeen := h.clientHeartbeats[entry.clientID]
+				if time.Since(lastSeen) > 15*time.Second && time.Since(entry.assignedAt) > 10*time.Second {
+					orphaned = true
+				}
+			}
+		} else if time.Since(entry.assignedAt) > 20*time.Second {
+			orphaned = true
+		}
+		if orphaned {
+			entry.tabName = tabName
+			entry.clientID = clientID
+			entry.assignedAt = time.Now()
+			req := entry.req
 			h.mu.Unlock()
 			return req, nil
 		}
 	}
+
 	notify := h.pollNotify
 	h.mu.Unlock()
 
@@ -92,7 +156,12 @@ func (h *Hub) WaitForNextRequest(ctx context.Context, tabName string, timeout ti
 		if len(h.pending) > 0 {
 			req := h.pending[0]
 			h.pending = h.pending[1:]
-			h.inFlight[req.ID] = req
+			h.inFlight[req.ID] = &inFlightEntry{
+				req:        req,
+				tabName:    tabName,
+				clientID:   clientID,
+				assignedAt: time.Now(),
+			}
 			return req, nil
 		}
 		return nil, nil
@@ -108,8 +177,13 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 	h.Touch("")
 
 	h.mu.Lock()
-	if c.Done || c.Error != "" {
-		delete(h.inFlight, c.ID)
+	if entry, ok := h.inFlight[c.ID]; ok {
+		if c.Text != "" {
+			entry.hasChunks = true
+		}
+		if c.Done || c.Error != "" {
+			delete(h.inFlight, c.ID)
+		}
 	}
 	ch, exists := h.waiters[c.ID]
 	h.mu.Unlock()
@@ -121,7 +195,7 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 	select {
 	case ch <- c:
 		return nil
-	default:
+	case <-time.After(5 * time.Second):
 		return fmt.Errorf("channel buffer full for ID %s", c.ID)
 	}
 }
@@ -132,7 +206,7 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 		return errors.New("no browser tab connected to the bridge")
 	}
 
-	reqID := fmt.Sprintf("req_%d", time.Now().UnixNano())
+	reqID := fmt.Sprintf("req_%d_%d", time.Now().UnixNano(), h.seq.Add(1))
 	req := &Request{
 		ID:        reqID,
 		Prompt:    prompt,
@@ -140,7 +214,7 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 		CreatedAt: time.Now(),
 	}
 
-	ch := make(chan Chunk, 200)
+	ch := make(chan Chunk, 512)
 
 	h.mu.Lock()
 	h.waiters[reqID] = ch

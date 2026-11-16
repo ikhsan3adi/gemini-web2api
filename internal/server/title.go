@@ -19,7 +19,7 @@ func isTitleSummaryRequest(prompt string) (bool, string) {
 		sessionText := ""
 		start := strings.Index(lower, "<session>")
 		end := strings.Index(lower, "</session>")
-		if start != -1 && end != -1 && end > start {
+		if start != -1 && end != -1 && end > start && end <= len(prompt) {
 			sessionText = strings.TrimSpace(prompt[start+len("<session>") : end])
 		} else {
 			// Fallback: look for the last non-instruction line
@@ -62,8 +62,9 @@ func generateFastTitleJSON(sessionContent string) string {
 		words = words[:5]
 	}
 	for i, w := range words {
-		if len(w) > 0 {
-			words[i] = strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
+		runes := []rune(w)
+		if len(runes) > 0 {
+			words[i] = strings.ToUpper(string(runes[:1])) + strings.ToLower(string(runes[1:]))
 		}
 	}
 

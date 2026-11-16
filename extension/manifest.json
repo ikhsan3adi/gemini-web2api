@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Web2API - Live Web Bridge & Exporter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Zero-ban live web bridge and cookie exporter for gemini-web2api. Interacts directly with your open Gemini Web or Gemini Enterprise tab in real time.",
   "permissions": [
     "cookies",
@@ -12,6 +12,7 @@
   "host_permissions": [
     "https://gemini.google.com/*",
     "https://vertexaisearch.cloud.google.com/*",
+    "https://business.gemini.google/*",
     "https://*.google.com/*",
     "http://localhost:8081/*",
     "http://127.0.0.1:8081/*"
@@ -24,10 +25,23 @@
     {
       "matches": [
         "https://gemini.google.com/*",
-        "https://vertexaisearch.cloud.google.com/*"
+        "https://vertexaisearch.cloud.google.com/*",
+        "https://business.gemini.google/*"
+      ],
+      "js": ["net-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://vertexaisearch.cloud.google.com/*",
+        "https://business.gemini.google/*"
       ],
       "js": ["bridge.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ]
 }
