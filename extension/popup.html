@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Gemini Cookie Exporter</title>
+  <title>Gemini Web2API Bridge & Exporter</title>
   <style>
     body {
       width: 380px;
@@ -50,10 +50,34 @@
       color: #991b1b;
       border: 1px solid #fecaca;
     }
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #4b5563;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin: 12px 0 6px 0;
+    }
+    .bridge-controls {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 10px;
+      margin-bottom: 12px;
+    }
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      user-select: none;
+    }
     textarea {
       width: 100%;
       box-sizing: border-box;
-      height: 140px;
+      height: 100px;
       font-family: monospace;
       font-size: 11px;
       padding: 8px;
@@ -68,9 +92,17 @@
       flex-direction: column;
       gap: 8px;
     }
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .btn-row button {
+      flex: 1;
+    }
     button {
       padding: 8px 12px;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 500;
       border-radius: 6px;
       cursor: pointer;
@@ -92,6 +124,14 @@
     button.secondary:hover {
       background: #f3f4f6;
     }
+    button.danger {
+      background: #fee2e2;
+      color: #991b1b;
+      border-color: #fca5a5;
+    }
+    button.danger:hover {
+      background: #fecaca;
+    }
     .footer {
       margin-top: 12px;
       font-size: 11px;
@@ -107,6 +147,18 @@
     <strong>Live Web Bridge:</strong> <span id="bridgeStatusText">Checking http://localhost:8081...</span>
   </div>
 
+  <div class="bridge-controls">
+    <label class="checkbox-label">
+      <input type="checkbox" id="autoRefreshCheckbox" checked>
+      Auto-refresh page after WorkBuddy response (prevents freeze)
+    </label>
+    <div class="btn-row">
+      <button id="refreshTabBtn" class="secondary">🔄 Refresh Page</button>
+      <button id="forceFinishBtn" class="danger">⏹️ Force Finish</button>
+    </div>
+  </div>
+
+  <div class="section-title">Cookie Exporter (Fallback)</div>
   <div id="statusBox" class="status warn">Checking session cookies...</div>
 
   <textarea id="output" readonly placeholder="Cookie data will appear here..."></textarea>

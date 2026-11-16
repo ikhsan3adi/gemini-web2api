@@ -3,10 +3,55 @@ document.addEventListener("DOMContentLoaded", async () => {
   const statusBox = document.getElementById("statusBox");
   const bridgeBox = document.getElementById("bridgeBox");
   const bridgeStatusText = document.getElementById("bridgeStatusText");
+  const autoRefreshCheckbox = document.getElementById("autoRefreshCheckbox");
+  const refreshTabBtn = document.getElementById("refreshTabBtn");
+  const forceFinishBtn = document.getElementById("forceFinishBtn");
   const output = document.getElementById("output");
   const copyJsonBtn = document.getElementById("copyJsonBtn");
   const downloadJsonBtn = document.getElementById("downloadJsonBtn");
   const copyTxtBtn = document.getElementById("copyTxtBtn");
+
+  // Load auto-refresh preference
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(["autoRefreshEnabled"], (res) => {
+      if (typeof res.autoRefreshEnabled === "boolean") {
+        autoRefreshCheckbox.checked = res.autoRefreshEnabled;
+      }
+    });
+  }
+
+  autoRefreshCheckbox.addEventListener("change", async () => {
+    const enabled = autoRefreshCheckbox.checked;
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ autoRefreshEnabled: enabled });
+    }
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab && activeTab.id) {
+      chrome.tabs.sendMessage(activeTab.id, { action: "setAutoRefresh", enabled }).catch(() => {});
+    }
+  });
+
+  // Refresh active tab button
+  refreshTabBtn.addEventListener("click", async () => {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab && activeTab.id) {
+      chrome.tabs.sendMessage(activeTab.id, { action: "refresh" }).catch(() => {
+        chrome.tabs.reload(activeTab.id);
+      });
+      refreshTabBtn.textContent = "Refreshed!";
+      setTimeout(() => { refreshTabBtn.textContent = "🔄 Refresh Page"; }, 1500);
+    }
+  });
+
+  // Force finish button
+  forceFinishBtn.addEventListener("click", async () => {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab && activeTab.id) {
+      chrome.tabs.sendMessage(activeTab.id, { action: "forceFinish" }).catch(() => {});
+      forceFinishBtn.textContent = "Sent!";
+      setTimeout(() => { forceFinishBtn.textContent = "⏹️ Force Finish"; }, 1500);
+    }
+  });
 
   // Check bridge server connectivity
   try {
@@ -90,7 +135,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  // Also include any remaining cookies if needed
   const cookieString = cookieParts.join("; ");
   const sapisid = cookieMap.get("SAPISID") || "";
 
@@ -110,7 +154,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
-          // Look for SNlM0e token in page script tags or global variables
           const scripts = document.querySelectorAll("script");
           for (const s of scripts) {
             const m = s.textContent.match(/"SNlM0e":"([^"]+)"/);

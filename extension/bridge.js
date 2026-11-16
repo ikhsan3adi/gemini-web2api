@@ -8,6 +8,42 @@
   let isPolling = false;
   let activeReqId = null;
   let lastFocusedInput = null;
+  let autoRefreshEnabled = true;
+  let currentActiveStream = null;
+
+  // Load user preference for auto-refresh
+  if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(["autoRefreshEnabled"], (res) => {
+      if (typeof res.autoRefreshEnabled === "boolean") {
+        autoRefreshEnabled = res.autoRefreshEnabled;
+      }
+      updateBadgeUI();
+    });
+  }
+
+  // Listen for messages from popup
+  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg.action === "refresh") {
+        resetOrRefreshPage();
+        sendResponse({ ok: true });
+      } else if (msg.action === "forceFinish") {
+        if (currentActiveStream && currentActiveStream.finish) {
+          currentActiveStream.finish();
+        } else {
+          resetOrRefreshPage();
+        }
+        sendResponse({ ok: true });
+      } else if (msg.action === "setAutoRefresh") {
+        autoRefreshEnabled = !!msg.enabled;
+        if (chrome.storage && chrome.storage.local) {
+          chrome.storage.local.set({ autoRefreshEnabled });
+        }
+        updateBadgeUI();
+        sendResponse({ ok: true, autoRefreshEnabled });
+      }
+    });
+  }
 
   // Track any input or contenteditable element the user focuses
   document.addEventListener("focusin", (e) => {
@@ -25,26 +61,39 @@
     return false;
   }
 
-  // 1. Floating Status Widget
-  const badge = document.createElement("div");
-  badge.id = "web2api-bridge-badge";
-  badge.style.cssText = `
+  function isVisible(el) {
+    if (!el) return false;
+    if (el.offsetWidth === 0 && el.offsetHeight === 0 && (!el.getClientRects || el.getClientRects().length === 0)) {
+      return false;
+    }
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+      return false;
+    }
+    return true;
+  }
+
+  // 1. In-Page Floating Control Widget
+  const badgeContainer = document.createElement("div");
+  badgeContainer.id = "web2api-bridge-badge";
+  badgeContainer.style.cssText = `
     position: fixed;
     bottom: 20px;
     right: 20px;
     z-index: 999999;
-    background: #111827;
+    background: rgba(17, 24, 39, 0.95);
     color: #f9fafb;
-    padding: 8px 14px;
+    padding: 6px 12px;
     border-radius: 20px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 12px;
     font-weight: 500;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
     display: flex;
     align-items: center;
     gap: 8px;
-    cursor: pointer;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.1);
     transition: all 0.2s ease;
     user-select: none;
   `;
@@ -56,29 +105,75 @@
     border-radius: 50%;
     background: #ef4444;
     display: inline-block;
+    flex-shrink: 0;
   `;
 
-  const text = document.createElement("span");
-  text.textContent = "Web2API: Connecting...";
+  const statusText = document.createElement("span");
+  statusText.textContent = "Web2API: Connecting...";
 
-  badge.appendChild(dot);
-  badge.appendChild(text);
-  document.body.appendChild(badge);
+  const refreshBtn = document.createElement("button");
+  refreshBtn.id = "web2api-refresh-btn";
+  refreshBtn.textContent = "🔄 Refresh";
+  refreshBtn.title = "Reload page to reset chat & ensure full interactivity";
+  refreshBtn.style.cssText = `
+    background: rgba(255,255,255,0.15);
+    color: #fff;
+    border: none;
+    border-radius: 12px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-left: 4px;
+    transition: background 0.15s ease;
+  `;
+  refreshBtn.onmouseover = () => { refreshBtn.style.background = "rgba(255,255,255,0.3)"; };
+  refreshBtn.onmouseout = () => { refreshBtn.style.background = "rgba(255,255,255,0.15)"; };
+  refreshBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (activeReqId && currentActiveStream) {
+      // Force complete current stream with whatever is on page before reloading
+      currentActiveStream.finish();
+    } else {
+      resetOrRefreshPage();
+    }
+  };
+
+  badgeContainer.appendChild(dot);
+  badgeContainer.appendChild(statusText);
+  badgeContainer.appendChild(refreshBtn);
+  document.body.appendChild(badgeContainer);
+
+  function updateBadgeUI() {
+    refreshBtn.textContent = activeReqId ? "⏹️ Send & Refresh" : "🔄 Refresh";
+    refreshBtn.title = activeReqId
+      ? "Force complete answer and refresh page"
+      : "Refresh page to start fresh clean chat";
+  }
 
   function setStatus(status, msg) {
     if (status === "connected") {
       dot.style.background = "#10b981";
-      text.textContent = msg || `Web2API Bridge: Connected (:8081)`;
+      statusText.textContent = msg || `Web2API: Ready (:8081)`;
     } else if (status === "busy") {
       dot.style.background = "#f59e0b";
-      text.textContent = msg || `Web2API: Generating reply...`;
+      statusText.textContent = msg || `Web2API: Generating...`;
     } else {
       dot.style.background = "#ef4444";
-      text.textContent = msg || `Web2API: Disconnected (Start server)`;
+      statusText.textContent = msg || `Web2API: Disconnected`;
+    }
+    updateBadgeUI();
+  }
+
+  function resetOrRefreshPage() {
+    console.log("[Web2API Bridge] Refreshing page to ensure fresh interactive state...");
+    if (window.location.hostname.includes("gemini.google.com")) {
+      window.location.href = "https://gemini.google.com/app";
+    } else {
+      window.location.reload();
     }
   }
 
-  // 2. Deep Tree Search for Inputs (including Shadow DOM and iframes)
+  // 2. Deep Tree Search for Inputs & Elements (Shadow DOM and iframes)
   function queryDeep(selector, root = document) {
     const results = [];
 
@@ -91,7 +186,7 @@
         } catch (e) {}
       }
 
-      // Traverse children looking for shadow roots
+      // Traverse shadow roots
       const children = node.children || [];
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
@@ -115,7 +210,37 @@
     return results;
   }
 
-  async function findChatInput(maxWaitMs = 3000) {
+  function extractDeepText(node) {
+    if (!node) return "";
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent || "";
+    }
+
+    // Try innerText first
+    let t = "";
+    try {
+      t = node.innerText || "";
+    } catch (e) {}
+    if (t && t.trim()) return t;
+
+    // If node has shadowRoot, traverse into shadowRoot
+    if (node.shadowRoot) {
+      const st = extractDeepText(node.shadowRoot);
+      if (st && st.trim()) return st;
+    }
+
+    // If node has childNodes, traverse recursively
+    const children = node.childNodes || [];
+    let combined = "";
+    for (let i = 0; i < children.length; i++) {
+      combined += extractDeepText(children[i]);
+    }
+    if (combined && combined.trim()) return combined;
+
+    return node.textContent || "";
+  }
+
+  async function findChatInput(maxWaitMs = 3500) {
     const start = Date.now();
 
     const inputSelectors = [
@@ -147,21 +272,20 @@
     ];
 
     while (Date.now() - start < maxWaitMs) {
-      // 1. Check last user-focused element
+      // 1. Check last focused element
       if (lastFocusedInput && isEditable(lastFocusedInput) && document.contains(lastFocusedInput)) {
         return lastFocusedInput;
       }
 
-      // 2. Check current activeElement
+      // 2. Check activeElement
       if (isEditable(document.activeElement)) {
         return document.activeElement;
       }
 
-      // 3. Search via known selectors
+      // 3. Search selectors
       for (const sel of inputSelectors) {
         const found = queryDeep(sel);
         for (const el of found) {
-          // Verify it is visible and not hidden
           const rect = el.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0 && !el.disabled && !el.readOnly) {
             return el;
@@ -169,13 +293,10 @@
         }
       }
 
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 150));
     }
 
-    // Collect debug info for error reporting
-    const allInputs = queryDeep("input, textarea, [contenteditable]");
-    const tagList = allInputs.map((el) => `${el.tagName.toLowerCase()}[placeholder="${el.placeholder || ""}"]`).join(", ");
-    throw new Error(`Could not find Gemini chat input box on page. (Found inputs: ${tagList || "none"}. Please click inside the chat box and retry)`);
+    throw new Error("Could not find Gemini chat input box. Please click inside chat box or refresh page.");
   }
 
   function findSendButton(inputEl) {
@@ -193,29 +314,271 @@
       'button:has(mat-icon[data-mat-icon-name="search"])'
     ];
 
-    // Check near input first
     if (inputEl) {
       const parentForm = inputEl.closest("form, mat-form-field, .input-area, .chat-box");
       if (parentForm) {
         for (const sel of btnSelectors) {
           const btn = parentForm.querySelector(sel);
-          if (btn && !btn.disabled) return btn;
+          if (btn && isVisible(btn) && !btn.disabled) return btn;
         }
       }
     }
 
-    // Search globally across deep DOM
     for (const sel of btnSelectors) {
       const btns = queryDeep(sel);
       for (const b of btns) {
-        if (!b.disabled) return b;
+        if (isVisible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true") {
+          return b;
+        }
       }
     }
 
     return null;
   }
 
-  // 3. Poll Server for Prompt Requests
+  function isSendButtonReady(inputEl) {
+    const btn = findSendButton(inputEl);
+    return !!btn;
+  }
+
+  function isGenerating() {
+    // Only check VISIBLE stop buttons
+    const stopBtnSelectors = [
+      'button[aria-label*="Stop" i]',
+      'button[aria-label*="停止" i]',
+      'button.stop-generating-button',
+      'button[mattooltip*="Stop" i]'
+    ];
+    for (const sel of stopBtnSelectors) {
+      const btns = queryDeep(sel);
+      for (const b of btns) {
+        if (isVisible(b)) return true;
+      }
+    }
+
+    // Check visible stop icon inside a visible button
+    const stopIcons = queryDeep('mat-icon[data-mat-icon-name="stop"]');
+    for (const icon of stopIcons) {
+      if (isVisible(icon)) {
+        const parentBtn = icon.closest("button");
+        if (parentBtn && isVisible(parentBtn)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function findResponseElements() {
+    const candidateSelectors = [
+      "message-content",
+      ".model-response-text",
+      ".markdown",
+      ".summary-content",
+      ".answer-content",
+      "discovery-engine-answer",
+      "[data-test-id*='response']",
+      "[data-test-id*='answer']",
+      "model-response"
+    ];
+
+    for (const sel of candidateSelectors) {
+      const els = queryDeep(sel);
+      const filtered = els.filter((el) => {
+        // Exclude elements inside user prompt
+        if (el.closest("user-query, .user-query, rich-textarea, form, .input-area")) {
+          return false;
+        }
+        return true;
+      });
+      if (filtered.length > 0) {
+        return filtered;
+      }
+    }
+    return [];
+  }
+
+  // 3. Web Page DOM Interaction & Prompt Dispatch
+  async function handlePromptRequest(reqId, prompt) {
+    // A. Locate Prompt Input Area
+    const inputArea = await findChatInput(3500);
+
+    // Snapshot existing model response count before submitting
+    const baselineResponses = findResponseElements();
+    const baselineCount = baselineResponses.length;
+    const baselineLastText = baselineCount > 0 ? extractDeepText(baselineResponses[baselineCount - 1]) : "";
+
+    inputArea.focus();
+
+    // Insert text simulating user interaction
+    if (inputArea.tagName === "TEXTAREA" || inputArea.tagName === "INPUT") {
+      inputArea.value = prompt;
+      inputArea.dispatchEvent(new Event("input", { bubbles: true }));
+      inputArea.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      inputArea.focus();
+      inputArea.innerHTML = "";
+      try {
+        const ok = document.execCommand("insertText", false, prompt);
+        if (!ok || !inputArea.textContent.trim()) {
+          inputArea.textContent = prompt;
+        }
+      } catch (e) {
+        inputArea.textContent = prompt;
+      }
+      inputArea.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    // B. Locate Send Button or trigger Enter
+    const sendBtn = findSendButton(inputArea);
+
+    if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute("aria-disabled") !== "true") {
+      sendBtn.click();
+    } else {
+      const enterDown = new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true
+      });
+      inputArea.dispatchEvent(enterDown);
+
+      const enterUp = new KeyboardEvent("keyup", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true
+      });
+      inputArea.dispatchEvent(enterUp);
+    }
+
+    await new Promise((r) => setTimeout(r, 400));
+
+    // C. Watch for Streaming Response
+    await observeResponseStream(reqId, inputArea, baselineCount, baselineLastText);
+
+    // D. Auto-Refresh page after response is delivered (if enabled)
+    if (autoRefreshEnabled) {
+      setStatus("busy", "Web2API: Refreshing page for next request...");
+      await new Promise((r) => setTimeout(r, 600));
+      resetOrRefreshPage();
+    }
+  }
+
+  function observeResponseStream(reqId, inputArea, baselineCount, baselineLastText) {
+    return new Promise((resolve) => {
+      let lastText = "";
+      let lastChangeTime = Date.now();
+      let completed = false;
+      const startTime = Date.now();
+
+      function getActiveResponseText() {
+        const currentResponses = findResponseElements();
+        if (currentResponses.length === 0) return "";
+
+        let targetEl = currentResponses[currentResponses.length - 1];
+        let fullText = extractDeepText(targetEl);
+
+        // If turn count has not increased, check if new text was appended to existing element
+        if (currentResponses.length === baselineCount && baselineLastText) {
+          if (fullText.startsWith(baselineLastText)) {
+            return fullText.slice(baselineLastText.length).trimStart();
+          }
+        }
+        return fullText;
+      }
+
+      function finish() {
+        if (completed) return;
+        completed = true;
+        clearInterval(checkInterval);
+        observer.disconnect();
+        currentActiveStream = null;
+
+        // If no text was captured via stream, do one final aggressive scrape
+        if (!lastText.trim()) {
+          const finalScrape = getActiveResponseText();
+          if (finalScrape.trim()) {
+            lastText = finalScrape;
+            sendChunk(reqId, finalScrape, false);
+          }
+        }
+
+        sendChunk(reqId, "", true).then(() => resolve()).catch(() => resolve());
+      }
+
+      currentActiveStream = { finish };
+
+      const checkInterval = setInterval(async () => {
+        if (completed) return;
+
+        const currentText = getActiveResponseText();
+        if (currentText.length > lastText.length) {
+          const delta = currentText.slice(lastText.length);
+          lastText = currentText;
+          lastChangeTime = Date.now();
+          setStatus("busy", `Web2API: Streaming (${lastText.length} chars)...`);
+          await sendChunk(reqId, delta, false);
+        }
+
+        const timeSinceChange = Date.now() - lastChangeTime;
+        const timeSinceStart = Date.now() - startTime;
+        const generating = isGenerating();
+        const sendReady = isSendButtonReady(inputArea);
+
+        // Completion criteria:
+        // 1. Text has been captured and send button has re-enabled with no stop button
+        if (lastText.length > 0 && !generating && sendReady && timeSinceChange > 600) {
+          finish();
+          return;
+        }
+
+        // 2. Text has been captured, generation stopped, and text settled
+        if (lastText.length > 0 && !generating && timeSinceChange > 1200) {
+          finish();
+          return;
+        }
+
+        // 3. Text has settled for 3 seconds even if stop button state is ambiguous
+        if (lastText.length > 0 && timeSinceChange > 3000) {
+          finish();
+          return;
+        }
+
+        // 4. Safety fallback: if 25s elapsed and we have text, finish
+        if (lastText.length > 0 && timeSinceStart > 25000 && timeSinceChange > 1500) {
+          finish();
+          return;
+        }
+      }, 150);
+
+      const observer = new MutationObserver(() => {
+        // Keeps loop active on DOM mutations
+      });
+
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+
+      // Absolute timeout: 90s max (not 180s)
+      setTimeout(() => {
+        if (!completed) {
+          finish();
+        }
+      }, 90000);
+    });
+  }
+
+  // 4. Poll Server for Prompt Requests
   async function pollServer() {
     if (isPolling) return;
     isPolling = true;
@@ -230,7 +593,7 @@
 
         if (!res.ok) {
           setStatus("disconnected");
-          await new Promise((r) => setTimeout(r, 3000));
+          await new Promise((r) => setTimeout(r, 2500));
           continue;
         }
 
@@ -256,7 +619,7 @@
         }
       } catch (err) {
         setStatus("disconnected");
-        await new Promise((r) => setTimeout(r, 3000));
+        await new Promise((r) => setTimeout(r, 2500));
       }
     }
   }
@@ -277,156 +640,6 @@
     } catch (e) {
       console.warn("[Web2API Bridge] Failed to send chunk:", e);
     }
-  }
-
-  // 4. Web Page DOM Interaction
-  async function handlePromptRequest(reqId, prompt) {
-    // A. Locate Prompt Input Area with retry and deep search
-    const inputArea = await findChatInput(3500);
-
-    inputArea.focus();
-
-    // Insert text simulating user interaction
-    if (inputArea.tagName === "TEXTAREA" || inputArea.tagName === "INPUT") {
-      inputArea.value = prompt;
-      inputArea.dispatchEvent(new Event("input", { bubbles: true }));
-      inputArea.dispatchEvent(new Event("change", { bubbles: true }));
-    } else {
-      inputArea.innerHTML = "";
-      document.execCommand("selectAll", false, null);
-      document.execCommand("insertText", false, prompt);
-      inputArea.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-
-    await new Promise((r) => setTimeout(r, 250));
-
-    // B. Locate Send Button or trigger Enter
-    const sendBtn = findSendButton(inputArea);
-
-    if (sendBtn && !sendBtn.disabled) {
-      sendBtn.click();
-    } else {
-      // Dispatch Enter key event
-      const enterDown = new KeyboardEvent("keydown", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true
-      });
-      inputArea.dispatchEvent(enterDown);
-
-      const enterUp = new KeyboardEvent("keyup", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true
-      });
-      inputArea.dispatchEvent(enterUp);
-    }
-
-    await new Promise((r) => setTimeout(r, 600));
-
-    // C. Watch for Streaming Response
-    await observeResponseStream(reqId);
-  }
-
-  function observeResponseStream(reqId) {
-    return new Promise((resolve, reject) => {
-      let lastText = "";
-      let lastChangeTime = Date.now();
-      let completed = false;
-
-      function findLatestResponseElement() {
-        const candidateSelectors = [
-          "model-response",
-          "message-content",
-          ".model-response-text",
-          ".response-container",
-          ".answer-content",
-          ".search-result-summary",
-          ".summary-content",
-          ".markdown",
-          "[data-test-id='model-turn']",
-          "[data-test-id*='response']",
-          "[data-test-id*='answer']"
-        ];
-
-        for (const sel of candidateSelectors) {
-          const els = queryDeep(sel);
-          if (els.length > 0) {
-            return els[els.length - 1];
-          }
-        }
-        return null;
-      }
-
-      function isGenerating() {
-        const stopBtnSelectors = [
-          'button[aria-label*="Stop" i]',
-          'button[aria-label*="停止" i]',
-          'button.stop-generating-button',
-          'mat-icon[data-mat-icon-name="stop"]'
-        ];
-        for (const sel of stopBtnSelectors) {
-          const btns = queryDeep(sel);
-          if (btns.length > 0) return true;
-        }
-        return false;
-      }
-
-      const checkInterval = setInterval(async () => {
-        if (completed) return;
-
-        const resEl = findLatestResponseElement();
-        if (resEl) {
-          const currentText = resEl.innerText || resEl.textContent || "";
-          if (currentText.length > lastText.length) {
-            const delta = currentText.slice(lastText.length);
-            lastText = currentText;
-            lastChangeTime = Date.now();
-            await sendChunk(reqId, delta, false);
-          }
-        }
-
-        const timeSinceChange = Date.now() - lastChangeTime;
-        const generating = isGenerating();
-
-        // If stopped generating and text has settled
-        if (lastText.length > 0 && !generating && timeSinceChange > 1200) {
-          finish();
-        } else if (lastText.length > 0 && timeSinceChange > 8000) {
-          finish();
-        }
-      }, 150);
-
-      function finish() {
-        if (completed) return;
-        completed = true;
-        clearInterval(checkInterval);
-        observer.disconnect();
-        sendChunk(reqId, "", true).then(() => resolve()).catch(() => resolve());
-      }
-
-      const observer = new MutationObserver(() => {
-        // Keeps interval active
-      });
-
-      observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
-
-      setTimeout(() => {
-        if (!completed) {
-          finish();
-        }
-      }, 180000);
-    });
   }
 
   // Start polling
