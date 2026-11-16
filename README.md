@@ -254,7 +254,9 @@ Or use JSON format if you know your specific `SAPISID` hashing needs:
 { "cookie": "SID=xxx; HSID=xxx; ...", "sapisid": "your_sapisid_value" }
 ```
 
-**Alternative (browser extension)**: Use any "Export Cookies" extension to export cookies for `gemini.google.com` in Netscape format, then convert to the single-line format above.
+**Alternative (browser extension)**:
+- **Built-in Extension**: Use the included browser extension in the `extension/` directory! Follow [`extension/README.md`](extension/README.md) to load it unpacked in Chrome/Edge, open Gemini Web or Gemini Enterprise, and click "Download cookie.json" with 1 click.
+- **3rd-Party Extensions**: Or use "Cookie-Editor" from the Chrome Web Store / Firefox Add-ons, export as Header String, and save to `cookie.txt`.
 
 ### Authenticated account path and XSRF token
 

@@ -256,7 +256,9 @@ SID=your_sid; HSID=your_hsid; SSID=your_ssid; APISID=your_apisid; SAPISID=your_s
 { "cookie": "SID=xxx; HSID=xxx; ...", "sapisid": "your_sapisid_value" }
 ```
 
-**替代方案（浏览器扩展）**：使用任何“导出 Cookie”扩展程序导出 Cookie`gemini.google.com`Netscape 格式，然后转换为上面的单行格式。
+**替代方案（浏览器扩展）**：
+- **内置扩展**：使用本仓库中 `extension/` 目录下的内置浏览器扩展！按照 [`extension/README.md`](extension/README.md) 在 Chrome/Edge 中加载已解压的扩展程序，打开 Gemini Web 或 Gemini Enterprise 页面，一键点击“Download cookie.json”即可导出。
+- **第三方扩展**：或者使用 Chrome 应用商店 / Firefox 附加组件中的 “Cookie-Editor”，导出为 Header String 格式并保存到 `cookie.txt`。
 
 ### 经过身份验证的帐户路径和 XSRF 令牌
 

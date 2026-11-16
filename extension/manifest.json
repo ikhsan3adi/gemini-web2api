@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Web2API - Cookie Exporter",
+  "version": "1.0.0",
+  "description": "One-click cookie and token exporter for gemini-web2api, supporting both Gemini Web and Gemini Enterprise (vertexaisearch.cloud.google.com)",
+  "permissions": [
+    "cookies",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://vertexaisearch.cloud.google.com/*",
+    "https://*.google.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Export Gemini Cookies"
+  }
+}
