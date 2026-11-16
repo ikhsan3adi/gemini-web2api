@@ -11,12 +11,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const downloadJsonBtn = document.getElementById("downloadJsonBtn");
   const copyTxtBtn = document.getElementById("copyTxtBtn");
 
-  // Load auto-refresh preference
+  // Load auto-refresh preference (default: false)
   if (chrome.storage && chrome.storage.local) {
     chrome.storage.local.get(["autoRefreshEnabled"], (res) => {
-      if (typeof res.autoRefreshEnabled === "boolean") {
-        autoRefreshCheckbox.checked = res.autoRefreshEnabled;
-      }
+      autoRefreshCheckbox.checked = res.autoRefreshEnabled === true;
     });
   }
 
