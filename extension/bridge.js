@@ -132,8 +132,8 @@
     e.stopPropagation();
     modelBtn.textContent = "⏳ Setting...";
     const ok = await ensureModelSelected("hydrogen");
-    modelBtn.textContent = ok ? "✅ Hydrogen" : "⚡ Hydrogen";
-    setTimeout(() => { modelBtn.textContent = "⚡ Hydrogen"; }, 2000);
+    modelBtn.textContent = ok ? "✅ Hydrogen" : "❌ Click 'Auto ∨'";
+    setTimeout(() => { modelBtn.textContent = "⚡ Hydrogen"; }, 2500);
   };
 
   const refreshBtn = document.createElement("button");
@@ -340,10 +340,52 @@
     el.click();
   }
 
+  function findModelTriggerElement() {
+    // Strategy 1: Find microphone button and look at adjacent buttons/elements
+    const micEls = queryDeep('mat-icon[data-mat-icon-name*="mic"], button[aria-label*="mic" i], button[mattooltip*="mic" i]');
+    for (const mic of micEls) {
+      if (isNavigationOrSidebar(mic)) continue;
+      const micBtn = mic.closest("button") || mic;
+      let sibling = micBtn.previousElementSibling;
+      while (sibling) {
+        const text = (sibling.innerText || sibling.textContent || "").trim();
+        if (/auto|hydrogen|gemini|flash|pro/i.test(text)) {
+          return sibling.closest("button, [role='button'], [role='combobox'], [aria-haspopup]") || sibling;
+        }
+        sibling = sibling.previousElementSibling;
+      }
+    }
+
+    // Strategy 2: Look inside the chat input box / bottom bar container
+    const inputContainers = queryDeep("form, .input-area, .chat-box, .input-container, discovery-engine-chat, .bottom-bar, mat-form-field");
+    for (const root of inputContainers) {
+      const els = queryDeep("button, [role='button'], [role='combobox'], mat-select, .mat-mdc-menu-trigger, [aria-haspopup], div, span", root);
+      for (const el of els) {
+        if (isNavigationOrSidebar(el)) continue;
+        const text = (el.innerText || el.textContent || "").trim();
+        if (/^auto\b/i.test(text) || /\bauto$/i.test(text) || text.toLowerCase() === "auto" || /auto\s*[\u25bc\u25bd\u2228\u2304v\u25be]/i.test(text)) {
+          return el.closest("button, [role='button'], [role='combobox'], [aria-haspopup]") || el;
+        }
+      }
+    }
+
+    // Strategy 3: Page-wide search excluding navigation/sidebar
+    const allEls = queryDeep("button, [role='button'], [role='combobox'], mat-select, .mat-mdc-menu-trigger");
+    for (const el of allEls) {
+      if (isNavigationOrSidebar(el)) continue;
+      const text = (el.innerText || el.textContent || "").trim();
+      if (/auto|hydrogen|gemini|flash|pro/i.test(text)) {
+        return el;
+      }
+    }
+
+    return null;
+  }
+
   // Automatically switch the model dropdown (e.g. "Auto ∨") to Gemini 4 Hydrogen
   async function ensureModelSelected(requestedModel) {
     if (!requestedModel) requestedModel = "hydrogen";
-    const targetKeywords = ["hydrogen", "gemini 4 hydrogen", "gemini-4-hydrogen"];
+    const targetKeywords = ["hydrogen", "gemini 4 hydrogen", "gemini-4-hydrogen", "4 hydrogen"];
     if (/flash/i.test(requestedModel)) {
       targetKeywords.length = 0;
       targetKeywords.push("flash");
@@ -352,67 +394,40 @@
       targetKeywords.push("pro");
     }
 
-    // 1. Search inside or adjacent to the chat input box / bottom bar
-    const inputContainers = queryDeep("form, .input-area, .chat-box, .input-container, discovery-engine-chat, .bottom-bar, mat-form-field");
-    const candidateDropdowns = [];
+    const trigger = findModelTriggerElement();
+    if (!trigger) {
+      console.warn("[Web2API Bridge] Could not find model selector dropdown trigger");
+      return false;
+    }
 
-    const searchRoots = inputContainers.length > 0 ? inputContainers : [document];
-    for (const root of searchRoots) {
-      const els = queryDeep("button, [role='button'], [role='combobox'], mat-select, .mat-mdc-menu-trigger, [aria-haspopup], div, span", root);
-      for (const el of els) {
-        if (isNavigationOrSidebar(el)) continue;
-        const text = (el.innerText || el.textContent || "").trim();
-        // Look for buttons that say Auto or model name
-        if (/^(Auto|Gemini|Hydrogen|Flash|Pro)(\s*[\u25bc\u25bd\u2228\u2304v\u25be]|(\s*expand_more)?)$/i.test(text) || text === "Auto") {
-          candidateDropdowns.push(el);
+    const currentText = (trigger.innerText || trigger.textContent || "").trim().toLowerCase();
+    if (targetKeywords.some((kw) => currentText.includes(kw))) {
+      console.log("[Web2API Bridge] Hydrogen model is already selected:", currentText);
+      return true;
+    }
+
+    console.log("[Web2API Bridge] Triggering model dropdown (current text:", currentText, ")");
+    simulateClick(trigger);
+
+    // Poll for menu overlay up to 1500ms
+    const start = Date.now();
+    while (Date.now() - start < 1500) {
+      await new Promise((r) => setTimeout(r, 120));
+      const menuItems = queryDeep("[role='menuitem'], [role='option'], .mat-mdc-menu-item, .mat-menu-item, mat-list-item, button, span, div, a");
+      for (const item of menuItems) {
+        if (isNavigationOrSidebar(item)) continue;
+        const itemText = (item.innerText || item.textContent || "").trim().toLowerCase();
+        if (targetKeywords.some((kw) => itemText.includes(kw))) {
+          console.log("[Web2API Bridge] Found and selecting model menu item:", itemText);
+          simulateClick(item);
+          await new Promise((r) => setTimeout(r, 250));
+          return true;
         }
       }
     }
 
-    // 2. Global fallback across page excluding navigation/sidebar
-    if (candidateDropdowns.length === 0) {
-      const allBtns = queryDeep("button, [role='button'], [role='combobox'], mat-select, .mat-mdc-menu-trigger");
-      for (const el of allBtns) {
-        if (isNavigationOrSidebar(el)) continue;
-        const text = (el.innerText || el.textContent || "").trim();
-        if (/auto|hydrogen|gemini|flash|pro/i.test(text)) {
-          candidateDropdowns.push(el);
-        }
-      }
-    }
-
-    for (const dropdown of candidateDropdowns) {
-      const currentText = (dropdown.innerText || dropdown.textContent || "").trim().toLowerCase();
-      // If already Hydrogen, we are good!
-      if (targetKeywords.some((kw) => currentText.includes(kw))) {
-        console.log("[Web2API Bridge] Hydrogen model is already selected:", currentText);
-        return true;
-      }
-
-      // If it says "Auto" or another model, click it to open menu
-      if (/auto|gemini|flash|pro/i.test(currentText)) {
-        console.log("[Web2API Bridge] Clicking model dropdown (current text:", currentText, ")");
-        simulateClick(dropdown);
-        await new Promise((r) => setTimeout(r, 350));
-
-        // Find menu item for Hydrogen
-        const menuItems = queryDeep("[role='menuitem'], [role='option'], .mat-mdc-menu-item, mat-list-item, button, span, div, a");
-        for (const item of menuItems) {
-          if (isNavigationOrSidebar(item)) continue;
-          const itemText = (item.innerText || item.textContent || "").trim().toLowerCase();
-          if (targetKeywords.some((kw) => itemText.includes(kw))) {
-            console.log("[Web2API Bridge] Found and selecting model menu item:", itemText);
-            simulateClick(item);
-            await new Promise((r) => setTimeout(r, 300));
-            return true;
-          }
-        }
-
-        // Click outside if not found
-        document.body.click();
-        await new Promise((r) => setTimeout(r, 150));
-      }
-    }
+    // Click outside if not matched
+    document.body.click();
     return false;
   }
 
@@ -801,6 +816,11 @@
       console.warn("[Web2API Bridge] Failed to send chunk:", e);
     }
   }
+
+  // Automatically switch dropdown to Hydrogen on tab startup
+  setTimeout(() => {
+    ensureModelSelected("hydrogen").catch(() => {});
+  }, 1500);
 
   // Start polling
   pollServer();
