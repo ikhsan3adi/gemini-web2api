@@ -285,6 +285,19 @@ https://gemini.google.com/u/1/app/...
 
 专业路由需要**双子座高级版**（付费订阅）。免费的 Google 帐户 cookie 将进行身份验证，但会默默地退回到 Flash。
 
+### 🛡️ 防封禁实时网页桥接（企业版与网页版推荐方案）
+
+为了彻底杜绝 Cookie 泄露或 Google 账户被风控封禁的风险，您无需提取或导出 Cookie。直接配合浏览器打开的真实标签页即可使用：
+
+1. 将 [`extension/`](extension/) 目录作为“已解压的扩展程序”加载到 Chrome 或 Edge 浏览器中（进入 `chrome://extensions` → 开启开发者模式 → 加载已解压的扩展程序）。
+2. 在浏览器中保持打开 **Gemini 企业版** (`vertexaisearch.cloud.google.com`) 或 **Gemini 网页版** (`gemini.google.com`)。
+3. 启动 `gemini-web2api`：
+   ```bash
+   ./gemini-web2api --port 8081
+   ```
+4. 页面右下角将出现浮动状态指示徽章：`🟢 Web2API Bridge: Connected (:8081)`。
+5. 任何发送到 `http://localhost:8081/v1/chat/completions` 的请求（来自 WorkBuddy、Cursor 或 curl）都会自动路由至您当前打开的浏览器标签页内执行，实时流式返回生成内容。
+
 ### Gemini 企业版（Vertex AI Search）支持
 
 如果您的企业使用托管于 `https://vertexaisearch.cloud.google.com/` 的 **Gemini Enterprise**，可配置 `base_url`：

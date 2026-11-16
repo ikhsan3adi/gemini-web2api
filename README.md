@@ -283,6 +283,19 @@ If authenticated requests return HTTP 400 with an `xsrf` error, refresh Gemini W
 
 Pro routing requires **Gemini Advanced** (paid subscription). A free Google account cookie will authenticate but silently fall back to Flash.
 
+### 🛡️ Anti-Ban Live Web Bridge (Recommended for Enterprise & Web)
+
+To completely eliminate the risk of Google account or cookie bans, you do not need to export cookies. You can run `gemini-web2api` alongside an open browser tab:
+
+1. Load the unpacked extension from [`extension/`](extension/) into Chrome or Edge (`chrome://extensions` → Developer mode → Load unpacked).
+2. Keep your **Gemini Enterprise** (`vertexaisearch.cloud.google.com`) or **Gemini Web** (`gemini.google.com`) tab open.
+3. Start `gemini-web2api`:
+   ```bash
+   ./gemini-web2api --port 8081
+   ```
+4. A floating status badge will appear on your Gemini web page: `🟢 Web2API Bridge: Connected (:8081)`.
+5. Any request sent to `http://localhost:8081/v1/chat/completions` (from WorkBuddy, Cursor, or curl) is automatically routed through your live browser tab, streaming tokens straight from Google's web UI.
+
 ### Gemini Enterprise (Vertex AI Search) Support
 
 If your organization uses **Gemini Enterprise** hosted at `https://vertexaisearch.cloud.google.com/`, configure `base_url`:

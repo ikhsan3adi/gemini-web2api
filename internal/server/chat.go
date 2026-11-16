@@ -72,6 +72,117 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	strChoice, isStr := req.ToolChoice.(string)
 	isToolNone := isStr && strChoice == "none"
 
+	// Check if an authenticated browser tab is connected via the extension bridge.
+	if a.Bridge != nil && a.Bridge.IsConnected() {
+		a.Logf("Routing chat completion through active browser bridge (%s)", a.Bridge.TabName())
+
+		if req.Stream && (len(req.Tools) == 0 || isToolNone) {
+			if !startSSE(w) {
+				return
+			}
+			firstChunk := models.OpenAIChatResponse{
+				ID:      cid,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resolved.Name,
+				Choices: []models.OpenAIChoice{
+					{
+						Index: 0,
+						Delta: &models.OpenAIMessage{
+							Role: "assistant",
+						},
+						FinishReason: nil,
+					},
+				},
+			}
+			_ = writeSSEData(w, firstChunk)
+
+			emitErr := a.Bridge.GenerateStream(r.Context(), prompt, resolved.Name, func(delta string) error {
+				chunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index: 0,
+							Delta: &models.OpenAIMessage{
+								Content: delta,
+							},
+							FinishReason: nil,
+						},
+					},
+				}
+				return writeSSEData(w, chunk)
+			})
+
+			if emitErr == nil {
+				stopReason := "stop"
+				endChunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index:        0,
+							Delta:        &models.OpenAIMessage{},
+							FinishReason: &stopReason,
+						},
+					},
+				}
+				_ = writeSSEData(w, endChunk)
+				_ = writeSSEDone(w)
+			} else {
+				a.Logf("Bridge chat stream error: %v", emitErr)
+			}
+			return
+		}
+
+		text, err := a.Bridge.Generate(r.Context(), prompt, resolved.Name)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+			return
+		}
+
+		var toolCalls []models.OpenAIToolCall
+		if len(req.Tools) > 0 && text != "" && !isToolNone {
+			text, toolCalls = format.ParseToolCalls(text)
+		}
+
+		msg := models.OpenAIMessage{
+			Role:    "assistant",
+			Content: text,
+		}
+		if text == "" {
+			msg.Content = nil
+		}
+		if len(toolCalls) > 0 {
+			msg.ToolCalls = toolCalls
+		}
+
+		finish := "stop"
+		if len(toolCalls) > 0 {
+			finish = "tool_calls"
+		}
+
+		resp := models.OpenAIChatResponse{
+			ID:      cid,
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   resolved.Name,
+			Choices: []models.OpenAIChoice{
+				{
+					Index:        0,
+					Message:      &msg,
+					FinishReason: &finish,
+				},
+			},
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	if req.Stream && (len(req.Tools) == 0 || isToolNone) {
 		if !startSSE(w) {
 			return

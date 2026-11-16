@@ -101,8 +101,13 @@
   </style>
 </head>
 <body>
-  <h2>Gemini Cookie Exporter <span class="badge" id="envBadge">Checking...</span></h2>
-  <div id="statusBox" class="status warn">Fetching session cookies...</div>
+  <h2>Gemini Web2API Bridge <span class="badge" id="envBadge">Checking...</span></h2>
+
+  <div id="bridgeBox" class="status warn" style="margin-bottom: 8px;">
+    <strong>Live Web Bridge:</strong> <span id="bridgeStatusText">Checking http://localhost:8081...</span>
+  </div>
+
+  <div id="statusBox" class="status warn">Checking session cookies...</div>
 
   <textarea id="output" readonly placeholder="Cookie data will appear here..."></textarea>
 
@@ -113,7 +118,7 @@
   </div>
 
   <div class="footer">
-    Works with gemini.google.com and vertexaisearch.cloud.google.com
+    Live Bridge active on gemini.google.com and vertexaisearch.cloud.google.com
   </div>
 
   <script src="popup.js"></script>

@@ -1,10 +1,33 @@
 document.addEventListener("DOMContentLoaded", async () => {
   const envBadge = document.getElementById("envBadge");
   const statusBox = document.getElementById("statusBox");
+  const bridgeBox = document.getElementById("bridgeBox");
+  const bridgeStatusText = document.getElementById("bridgeStatusText");
   const output = document.getElementById("output");
   const copyJsonBtn = document.getElementById("copyJsonBtn");
   const downloadJsonBtn = document.getElementById("downloadJsonBtn");
   const copyTxtBtn = document.getElementById("copyTxtBtn");
+
+  // Check bridge server connectivity
+  try {
+    const bridgeRes = await fetch("http://localhost:8081/bridge/status");
+    if (bridgeRes.ok) {
+      const bData = await bridgeRes.json();
+      if (bData.connected) {
+        bridgeBox.className = "status success";
+        bridgeStatusText.textContent = `Connected (${bData.tab || "tab active"})`;
+      } else {
+        bridgeBox.className = "status warn";
+        bridgeStatusText.textContent = "Server running on :8081 (Open Gemini page to connect)";
+      }
+    } else {
+      bridgeBox.className = "status error";
+      bridgeStatusText.textContent = "Server returned error";
+    }
+  } catch (e) {
+    bridgeBox.className = "status error";
+    bridgeStatusText.textContent = "Server not reachable (Start gemini-web2api)";
+  }
 
   let currentJson = "";
   let currentTxt = "";

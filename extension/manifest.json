@@ -1,20 +1,33 @@
 {
   "manifest_version": 3,
-  "name": "Gemini Web2API - Cookie Exporter",
-  "version": "1.0.0",
-  "description": "One-click cookie and token exporter for gemini-web2api, supporting both Gemini Web and Gemini Enterprise (vertexaisearch.cloud.google.com)",
+  "name": "Gemini Web2API - Live Web Bridge & Exporter",
+  "version": "1.1.0",
+  "description": "Zero-ban live web bridge and cookie exporter for gemini-web2api. Interacts directly with your open Gemini Web or Gemini Enterprise tab in real time.",
   "permissions": [
     "cookies",
     "activeTab",
-    "scripting"
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
     "https://gemini.google.com/*",
     "https://vertexaisearch.cloud.google.com/*",
-    "https://*.google.com/*"
+    "https://*.google.com/*",
+    "http://localhost:8081/*",
+    "http://127.0.0.1:8081/*"
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Export Gemini Cookies"
-  }
+    "default_title": "Gemini Web2API Bridge"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://vertexaisearch.cloud.google.com/*"
+      ],
+      "js": ["bridge.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }
