@@ -372,30 +372,62 @@
 
   function findResponseElements() {
     const candidateSelectors = [
+      // Vertex AI Search & Enterprise Google Cloud Discovery Engine
+      "discovery-engine-formatted-text",
+      "discovery-engine-markdown",
+      "discovery-engine-message:not([user]):not(.user-message)",
+      "discovery-engine-chat-message:not([user]):not(.user-message)",
+      "discovery-engine-answer",
+      "discovery-engine-answer-content",
+      ".summary-content",
+      ".answer-content",
+      ".answer-text",
+      ".search-result-summary",
+      ".agent-message",
+      ".bot-message",
+      ".bot-response",
+      ".response-text",
+      "[data-test-id*='answer']",
+      "[data-test-id*='response']",
+      "[data-test-id*='agent']",
+      "[data-test-id*='bot']",
+      "[data-test-id*='message']",
+      // Consumer Gemini Web
       "message-content",
       ".model-response-text",
       ".markdown",
-      ".summary-content",
-      ".answer-content",
-      "discovery-engine-answer",
-      "[data-test-id*='response']",
-      "[data-test-id*='answer']",
+      ".response-container",
       "model-response"
     ];
 
     for (const sel of candidateSelectors) {
-      const els = queryDeep(sel);
-      const filtered = els.filter((el) => {
-        // Exclude elements inside user prompt
-        if (el.closest("user-query, .user-query, rich-textarea, form, .input-area")) {
-          return false;
+      try {
+        const els = queryDeep(sel);
+        const filtered = els.filter((el) => {
+          if (el.closest("user-query, .user-query, rich-textarea, form, .input-area, mat-form-field")) {
+            return false;
+          }
+          return true;
+        });
+        if (filtered.length > 0) {
+          return filtered;
         }
-        return true;
-      });
-      if (filtered.length > 0) {
-        return filtered;
-      }
+      } catch (e) {}
     }
+
+    // Dynamic fallback: look for any container that has text inside chat area
+    const fallbackEls = queryDeep("[class*='agent'], [class*='bot'], [class*='response'], [class*='answer'], [class*='summary'], [class*='markdown'], [role='article']");
+    const validFallbacks = fallbackEls.filter((el) => {
+      if (el.closest("user-query, .user-query, rich-textarea, form, .input-area, mat-form-field")) {
+        return false;
+      }
+      const t = extractDeepText(el);
+      return t && t.trim().length > 0;
+    });
+    if (validFallbacks.length > 0) {
+      return validFallbacks;
+    }
+
     return [];
   }
 
@@ -535,25 +567,25 @@
 
         // Completion criteria:
         // 1. Text has been captured and send button has re-enabled with no stop button
-        if (lastText.length > 0 && !generating && sendReady && timeSinceChange > 600) {
+        if (lastText.length > 0 && !generating && sendReady && timeSinceChange > 400) {
           finish();
           return;
         }
 
         // 2. Text has been captured, generation stopped, and text settled
-        if (lastText.length > 0 && !generating && timeSinceChange > 1200) {
+        if (lastText.length > 0 && !generating && timeSinceChange > 800) {
           finish();
           return;
         }
 
-        // 3. Text has settled for 3 seconds even if stop button state is ambiguous
-        if (lastText.length > 0 && timeSinceChange > 3000) {
+        // 3. Text has settled for 2 seconds even if stop button state is ambiguous
+        if (lastText.length > 0 && timeSinceChange > 2000) {
           finish();
           return;
         }
 
-        // 4. Safety fallback: if 25s elapsed and we have text, finish
-        if (lastText.length > 0 && timeSinceStart > 25000 && timeSinceChange > 1500) {
+        // 4. Safety fallback: if 15s elapsed and we have text, finish
+        if (lastText.length > 0 && timeSinceStart > 15000 && timeSinceChange > 1000) {
           finish();
           return;
         }

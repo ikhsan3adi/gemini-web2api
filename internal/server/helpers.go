@@ -98,6 +98,17 @@ func writeSSEDone(w http.ResponseWriter) error {
 	return nil
 }
 
+func writeSSEComment(w http.ResponseWriter, comment string) error {
+	_, err := fmt.Fprintf(w, ": %s\n\n", comment)
+	if err != nil {
+		return err
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
 func (a *App) uploadImages(images []format.Image) ([]string, error) {
 	if len(images) == 0 {
 		return nil, nil

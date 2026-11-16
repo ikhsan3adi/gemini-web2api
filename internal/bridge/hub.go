@@ -140,6 +140,12 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 	defer func() {
 		h.mu.Lock()
 		delete(h.waiters, reqID)
+		for i, r := range h.pending {
+			if r.ID == reqID {
+				h.pending = append(h.pending[:i], h.pending[i+1:]...)
+				break
+			}
+		}
 		h.mu.Unlock()
 	}()
 
