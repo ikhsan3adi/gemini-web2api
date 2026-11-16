@@ -2,13 +2,11 @@ name: Build Windows Binary
 
 on:
   push:
-    branches:
-      - main
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -49,3 +47,25 @@ jobs:
           name: gemini-web2api-windows-${{ matrix.goarch }}
           path: dist/*.exe
           if-no-files-found: error
+
+  release-windows:
+    name: Publish Windows Release
+    needs: build-windows
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release Windows binary
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Windows Build
+          prerelease: true
+          files: dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
