@@ -325,9 +325,16 @@
     throw new Error("Could not find Gemini chat input box. Please click inside chat box or refresh page.");
   }
 
-  function isNavigationOrSidebar(el) {
+  function isNavigationOrSidebar(el, inputEl) {
     if (!el) return false;
-    return !!el.closest("nav, aside, mat-sidenav, .sidebar, .side-nav, .nav, .menu, header, [role='navigation'], [aria-label*='sidebar' i]");
+    // If element is inside the same input container, bottom bar, or chat box, it is NOT navigation!
+    if (inputEl) {
+      const chatContainer = inputEl.closest("form, .bottom-bar, .input-area, .chat-box, .input-container, discovery-engine-chat, mat-form-field");
+      if (chatContainer && chatContainer.contains(el)) {
+        return false;
+      }
+    }
+    return !!el.closest("nav, aside.left-nav, mat-sidenav.sidebar-nav, .side-nav, [role='navigation'], [aria-label*='sidebar' i]");
   }
 
   function simulateClick(el) {
@@ -466,12 +473,25 @@
     return false;
   }
 
-  function findSendButton(inputEl) {
+  function isNotSendButton(btn) {
+    if (!btn) return true;
+    const t = (btn.innerText || btn.textContent || "").trim().toLowerCase();
+    const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
+    const tip = (btn.getAttribute("mattooltip") || "").toLowerCase();
+    if (/^auto(\s|$)/i.test(t) || aria.includes("auto") || tip.includes("auto")) return true;
+    if (t === "mic" || aria.includes("mic") || tip.includes("mic")) return true;
+    if (t.includes("keyboard_arrow_down") && /auto/i.test(t)) return true;
+    return false;
+  }
+
+  function findAllCandidateSendButtons(inputEl) {
+    const candidates = [];
+
     // Priority 1: Match icons with text or name "arrow_upward", "send", "arrow_forward"
     // (Vertex AI Search send button uses <mat-icon>arrow_upward</mat-icon>)
     const iconCandidates = queryDeep('mat-icon, svg, [data-icon], .material-icons, span, i');
     for (const icon of iconCandidates) {
-      if (isNavigationOrSidebar(icon)) continue;
+      if (isNavigationOrSidebar(icon, inputEl)) continue;
       const text = (icon.innerText || icon.textContent || "").trim().toLowerCase();
       const name = (icon.getAttribute("data-mat-icon-name") || "").toLowerCase();
       const dataIcon = (icon.getAttribute("data-icon") || "").toLowerCase();
@@ -484,8 +504,8 @@
         aria.includes("send") || aria.includes("submit")
       ) {
         const btn = icon.closest('button, [role="button"]') || icon.parentElement;
-        if (btn && isVisible(btn) && !isNavigationOrSidebar(btn)) {
-          return btn;
+        if (btn && isVisible(btn) && !isNotSendButton(btn) && !candidates.includes(btn)) {
+          candidates.push(btn);
         }
       }
     }
@@ -493,7 +513,7 @@
     // Priority 2: In Vertex AI Search, send button is right next to the mic button
     const micCandidates = queryDeep('mat-icon, button[aria-label*="mic" i], button[mattooltip*="mic" i]');
     for (const mic of micCandidates) {
-      if (isNavigationOrSidebar(mic)) continue;
+      if (isNavigationOrSidebar(mic, inputEl)) continue;
       const text = (mic.innerText || mic.textContent || "").trim().toLowerCase();
       const name = (mic.getAttribute("data-mat-icon-name") || "").toLowerCase();
       if (text === "mic" || name === "mic" || mic.getAttribute("aria-label")?.toLowerCase().includes("mic")) {
@@ -503,31 +523,22 @@
           const btn = (sib.tagName === "BUTTON" || sib.getAttribute("role") === "button")
             ? sib
             : sib.querySelector('button, [role="button"]');
-          if (btn && isVisible(btn) && !isNavigationOrSidebar(btn)) {
-            return btn;
+          if (btn && isVisible(btn) && !isNotSendButton(btn) && !candidates.includes(btn)) {
+            candidates.push(btn);
           }
           sib = sib.nextElementSibling;
         }
       }
     }
 
-    // Priority 3: Within the input container or bottom bar, find send/submit button
+    // Priority 3: Within the input container or bottom bar, find any button that isn't Auto or mic
     if (inputEl) {
       const container = inputEl.closest("form, .bottom-bar, .input-area, .chat-box, .input-container, discovery-engine-chat, mat-form-field") || inputEl.parentElement;
       if (container) {
         const btns = queryDeep('button, [role="button"]', container);
         for (const b of btns) {
-          if (!isNavigationOrSidebar(b) && isVisible(b)) {
-            const aria = (b.getAttribute("aria-label") || "").toLowerCase();
-            const tip = (b.getAttribute("mattooltip") || "").toLowerCase();
-            const t = (b.innerText || b.textContent || "").trim().toLowerCase();
-            if (
-              aria.includes("send") || aria.includes("submit") || aria.includes("发送") ||
-              tip.includes("send") || tip.includes("submit") ||
-              t.includes("arrow_upward") || t.includes("send")
-            ) {
-              return b;
-            }
+          if (isVisible(b) && !isNotSendButton(b) && !candidates.includes(b)) {
+            candidates.push(b);
           }
         }
       }
@@ -546,18 +557,105 @@
     for (const sel of btnSelectors) {
       const btns = queryDeep(sel);
       for (const b of btns) {
-        if (!isNavigationOrSidebar(b) && isVisible(b)) {
-          return b;
+        if (!isNavigationOrSidebar(b, inputEl) && isVisible(b) && !isNotSendButton(b) && !candidates.includes(b)) {
+          candidates.push(b);
         }
       }
     }
 
-    return null;
+    return candidates;
+  }
+
+  function findSendButton(inputEl) {
+    const all = findAllCandidateSendButtons(inputEl);
+    return all.length > 0 ? all[0] : null;
   }
 
   function isSendButtonReady(inputEl) {
-    const btn = findSendButton(inputEl);
-    return !!btn;
+    const btns = findAllCandidateSendButtons(inputEl);
+    return btns.length > 0;
+  }
+
+  async function submitPrompt(inputArea) {
+    const candidateBtns = findAllCandidateSendButtons(inputArea);
+    console.log("[Web2API Bridge] Candidate send buttons found:", candidateBtns.length, candidateBtns);
+
+    // Stage 1: Try clicking candidate buttons with disabled attribute clearing
+    for (const btn of candidateBtns) {
+      console.log("[Web2API Bridge] Attempting click on candidate send button:", btn);
+      try {
+        btn.disabled = false;
+        btn.removeAttribute("disabled");
+        btn.setAttribute("aria-disabled", "false");
+        btn.classList.remove("disabled", "mat-button-disabled", "mdc-button--disabled");
+      } catch (e) {}
+
+      simulateClick(btn);
+      const icon = btn.querySelector("mat-icon, svg, span, i");
+      if (icon) simulateClick(icon);
+
+      await new Promise((r) => setTimeout(r, 250));
+
+      const remaining = (inputArea.value || inputArea.textContent || "").trim();
+      if (!remaining || isGenerating()) {
+        console.log("[Web2API Bridge] Prompt submitted successfully via send button click!");
+        return true;
+      }
+    }
+
+    // Stage 2: Dispatch Enter key events (composed: true for shadow DOM)
+    console.log("[Web2API Bridge] Buttons did not clear input, dispatching Enter key...");
+    const enterOpts = {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      charCode: 13,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window
+    };
+
+    inputArea.focus();
+    inputArea.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
+    inputArea.dispatchEvent(new KeyboardEvent("keypress", enterOpts));
+    inputArea.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
+
+    // Also dispatch on parent element and shadow host if inside shadow DOM
+    if (inputArea.parentElement) {
+      inputArea.parentElement.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
+      inputArea.parentElement.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
+    }
+    const rootNode = inputArea.getRootNode();
+    if (rootNode && rootNode.host) {
+      rootNode.host.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
+      rootNode.host.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
+    }
+
+    await new Promise((r) => setTimeout(r, 300));
+    const remainingAfterEnter = (inputArea.value || inputArea.textContent || "").trim();
+    if (!remainingAfterEnter || isGenerating()) {
+      console.log("[Web2API Bridge] Prompt submitted successfully via Enter key!");
+      return true;
+    }
+
+    // Stage 3: Form requestSubmit / submit
+    if (inputArea.form) {
+      console.log("[Web2API Bridge] Attempting form.requestSubmit()...");
+      try {
+        if (inputArea.form.requestSubmit) inputArea.form.requestSubmit();
+        else inputArea.form.submit();
+      } catch (e) {}
+    }
+
+    // Stage 4: Secondary click retry on all candidate buttons
+    for (const btn of candidateBtns) {
+      simulateClick(btn);
+    }
+
+    await new Promise((r) => setTimeout(r, 300));
+    return !(inputArea.value || inputArea.textContent || "").trim() || isGenerating();
   }
 
   function isGenerating() {
@@ -592,12 +690,13 @@
   function cleanResponseText(rawText) {
     if (!rawText) return "";
 
-    // 1. Strip Lit / Polymer template markers like ?lit$203076504$ or lit$12345$
-    let text = rawText.replace(/\?lit\$[0-9a-zA-Z]+\$/g, "").replace(/lit\$[0-9a-zA-Z]+\$/g, "");
+    // 1. Strip Lit / Polymer template markers like <!--?lit$203076504$--> or ?lit$203076504$ or lit$12345$
+    let text = rawText
+      .replace(/<\!--\??lit\$[0-9a-zA-Z]+\$-->/g, "")
+      .replace(/\??lit\$[0-9a-zA-Z]+\$/g, "");
 
     // 2. Strip disclaimer lines
-    text = text.replace(/Generative AI may display inaccurate information.*$/gim, "");
-    text = text.replace(/Generative AI is experimental.*$/gim, "");
+    text = text.replace(/Generative AI (may display inaccurate information|is experimental).*$/gim, "");
 
     // 3. Strip standalone UI control labels
     const uiTerms = [
@@ -634,12 +733,12 @@
     if (isNavigationOrSidebar(el)) return false;
 
     // Reject anything inside form, bottom bar, input area, or user queries
-    if (el.closest("form, .bottom-bar, .input-area, .chat-box-input, .input-container, mat-form-field, rich-textarea, user-query, .user-query, [user]")) {
+    if (el.closest("form, .bottom-bar, .input-area, .chat-box-input, .input-container, mat-form-field, rich-textarea, user-query, .user-query, [user], discovery-engine-input")) {
       return false;
     }
 
-    // Reject if it contains input controls
-    if (el.querySelector("textarea, input, mat-form-field, rich-textarea")) {
+    // Reject if it contains input controls or buttons (A real model response will never contain a textarea, input, or button)
+    if (el.querySelector("textarea, input, mat-form-field, rich-textarea, button, [role='button']")) {
       return false;
     }
 
@@ -704,6 +803,18 @@
   function setInputValue(el, val) {
     el.focus();
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+      // 1. Dispatch beforeinput
+      try {
+        el.dispatchEvent(new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          inputType: "insertFromPaste",
+          data: val
+        }));
+      } catch (e) {}
+
+      // 2. Set value via prototype setter and direct assignment
       const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
       const setMethod = Object.getOwnPropertyDescriptor(proto, "value")?.set;
       if (setMethod) {
@@ -711,11 +822,17 @@
       } else {
         el.value = val;
       }
+
+      // 3. Dispatch input and change events
       el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true, composed: true }));
       try {
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, composed: true, inputType: "insertText", data: val }));
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, composed: true, inputType: "insertFromPaste", data: val }));
       } catch (e) {}
       el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true, composed: true }));
+
+      // 4. Dispatch keydown/keyup so any reactive key listeners enable the send button
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, composed: true }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true, composed: true }));
     } else {
       el.focus();
       document.execCommand("selectAll", false, null);
@@ -725,12 +842,14 @@
         ok = document.execCommand("insertText", false, val);
       } catch (e) {}
       if (!ok || !el.textContent.trim()) {
-        el.textContent = val;
+        el.innerHTML = "<p>" + val.replace(/\n/g, "<br>") + "</p>";
       }
       el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true, composed: true }));
       try {
         el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, composed: true, inputType: "insertText", data: val }));
       } catch (e) {}
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, composed: true }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true, composed: true }));
     }
   }
 
@@ -754,52 +873,11 @@
     // Insert text simulating user interaction
     setInputValue(inputArea, prompt);
 
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 200));
 
-    // Poll up to 2500ms for send button to become enabled
-    let sendBtn = null;
-    const sendWaitStart = Date.now();
-    while (Date.now() - sendWaitStart < 2500) {
-      sendBtn = findSendButton(inputArea);
-      if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute("aria-disabled") !== "true") {
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
-    if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute("aria-disabled") !== "true") {
-      console.log("[Web2API Bridge] Found enabled send button, clicking:", sendBtn);
-      simulateClick(sendBtn);
-      const icon = sendBtn.querySelector("mat-icon, svg");
-      if (icon) simulateClick(icon);
-    }
-
-    await new Promise((r) => setTimeout(r, 350));
-
-    // Fallback: If input is not cleared, dispatch Enter key
-    const currentInputVal = inputArea.value || inputArea.textContent || "";
-    if (currentInputVal.trim().length > 0) {
-      console.log("[Web2API Bridge] Input not cleared after click, attempting Enter key dispatch...");
-      const enterOpts = {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window
-      };
-      inputArea.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
-      inputArea.dispatchEvent(new KeyboardEvent("keypress", enterOpts));
-      inputArea.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
-
-      // Re-check send button
-      const retryBtn = findSendButton(inputArea);
-      if (retryBtn) {
-        simulateClick(retryBtn);
-      }
-    }
+    // Submit prompt using multi-stage dispatcher
+    const submitSuccess = await submitPrompt(inputArea);
+    console.log("[Web2API Bridge] submitPrompt result:", submitSuccess);
 
     await new Promise((r) => setTimeout(r, 400));
 
@@ -855,6 +933,12 @@
           }
         }
 
+        if (!lastText.trim()) {
+          console.warn("[Web2API Bridge] No model response captured within timeout");
+          sendChunk(reqId, "", true, "Model did not respond. Please verify the prompt was sent on the page or refresh.").then(() => resolve()).catch(() => resolve());
+          return;
+        }
+
         sendChunk(reqId, "", true).then(() => resolve()).catch(() => resolve());
       }
 
@@ -881,8 +965,8 @@
         const timeSinceStart = Date.now() - startTime;
         const sendReady = isSendButtonReady(inputArea);
 
-        // Do not finish before generation has started (unless timeout after 12s)
-        if (!hasStarted && timeSinceStart < 12000) {
+        // Do not finish before generation has started (unless timeout after 25s)
+        if (!hasStarted && timeSinceStart < 25000) {
           return;
         }
 
