@@ -22,6 +22,7 @@ type Config struct {
 	APIKeys           []string `json:"api_keys"`
 	Impersonate       string   `json:"impersonate"`
 	TemporaryChats    bool     `json:"temporary_chats"`
+	BaseURL           string   `json:"base_url"`
 }
 
 func Default() Config {
@@ -41,6 +42,7 @@ func Default() Config {
 		APIKeys:           []string{},
 		Impersonate:       "",
 		TemporaryChats:    false,
+		BaseURL:           "https://gemini.google.com",
 	}
 }
 
@@ -74,6 +76,7 @@ func Load(path string) (Config, error) {
 		APIKeys           *[]string `json:"api_keys"`
 		Impersonate       *string   `json:"impersonate"`
 		TemporaryChats    *bool     `json:"temporary_chats"`
+		BaseURL           *string   `json:"base_url"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -124,6 +127,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.TemporaryChats != nil {
 		cfg.TemporaryChats = *aux.TemporaryChats
+	}
+	if aux.BaseURL != nil && *aux.BaseURL != "" {
+		cfg.BaseURL = *aux.BaseURL
 	}
 
 	return cfg, nil

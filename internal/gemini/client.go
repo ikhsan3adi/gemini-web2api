@@ -120,7 +120,7 @@ func (c *Client) SetBL(bl string) {
 // UpdateBLIfNeeded fetches the latest BL from Gemini and updates it if different from current.
 // Returns (newBL, changed, error).
 func (c *Client) UpdateBLIfNeeded() (string, bool, error) {
-	newBL, err := FetchLatestBL(c.HTTP)
+	newBL, err := FetchLatestBLWithBaseURL(c.HTTP, c.Cfg.BaseURL)
 	if err != nil {
 		return "", false, err
 	}
@@ -142,11 +142,16 @@ func (c *Client) buildHeaders() http.Header {
 		authUser = cookieInfo.AuthUser
 	}
 
+	baseURL := c.Cfg.BaseURL
+	if baseURL == "" {
+		baseURL = "https://gemini.google.com"
+	}
+
 	prefix := AccountPrefix(authUser)
 	h := make(http.Header)
 	h.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.Set("Origin", "https://gemini.google.com")
-	h.Set("Referer", fmt.Sprintf("https://gemini.google.com%s/app", prefix))
+	h.Set("Origin", baseURL)
+	h.Set("Referer", fmt.Sprintf("%s%s/app", baseURL, prefix))
 	h.Set("X-Same-Domain", "1")
 	h.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
@@ -158,7 +163,7 @@ func (c *Client) buildHeaders() http.Header {
 		h.Set("Cookie", cookieInfo.Cookie)
 	}
 	if cookieInfo.SAPISID != "" {
-		hash := SAPISIDHash(cookieInfo.SAPISID)
+		hash := SAPISIDHashWithOrigin(cookieInfo.SAPISID, baseURL)
 		if hash != "" {
 			h.Set("Authorization", hash)
 		}

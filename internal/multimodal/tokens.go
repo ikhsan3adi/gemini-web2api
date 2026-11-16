@@ -64,7 +64,12 @@ func (c *TokenCache) fetchPageTokens() PageTokens {
 		At:     "",
 	}
 
-	reqURL := fmt.Sprintf("https://gemini.google.com%s/app", gemini.AccountPrefix(c.cfg.AuthUser))
+	baseURL := c.cfg.BaseURL
+	if baseURL == "" {
+		baseURL = "https://gemini.google.com"
+	}
+
+	reqURL := fmt.Sprintf("%s%s/app", baseURL, gemini.AccountPrefix(c.cfg.AuthUser))
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return tokens
@@ -76,7 +81,7 @@ func (c *TokenCache) fetchPageTokens() PageTokens {
 		req.Header.Set("Cookie", cookieInfo.Cookie)
 	}
 	if cookieInfo.SAPISID != "" {
-		req.Header.Set("Authorization", gemini.SAPISIDHash(cookieInfo.SAPISID))
+		req.Header.Set("Authorization", gemini.SAPISIDHashWithOrigin(cookieInfo.SAPISID, baseURL))
 	}
 
 	resp, err := c.client.Do(req)

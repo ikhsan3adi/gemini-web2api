@@ -38,6 +38,7 @@ func main() {
 	cookieFlag := flag.String("cookie-file", "", "Cookie file path")
 	proxyFlag := flag.String("proxy", "", "HTTP proxy URL")
 	impersonateFlag := flag.String("impersonate", "", "TLS impersonation profile")
+	baseURLFlag := flag.String("base-url", "", "Upstream Gemini base URL (e.g. https://gemini.google.com or https://vertexaisearch.cloud.google.com)")
 	versionFlag := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
@@ -70,6 +71,9 @@ func main() {
 	}
 	if *impersonateFlag != "" {
 		cfg.Impersonate = *impersonateFlag
+	}
+	if *baseURLFlag != "" {
+		cfg.BaseURL = *baseURLFlag
 	}
 
 	app := server.New(cfg, currentVersion)
@@ -114,6 +118,7 @@ func main() {
 	fmt.Printf("gemini-web2api %s\n", currentVersion)
 	fmt.Printf("  Listening:   http://%s:%d\n", cfg.Host, cfg.Port)
 	fmt.Printf("  Base URL:    http://localhost:%d/v1\n", cfg.Port)
+	fmt.Printf("  Upstream:    %s\n", cfg.BaseURL)
 	fmt.Printf("  Models:      %s\n", strings.Join(modelKeys, ", "))
 	fmt.Printf("  Cookie:      %s\n", cookieStatus)
 	fmt.Printf("  Proxy:       %s\n", proxyStatus)
