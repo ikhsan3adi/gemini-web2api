@@ -242,20 +242,26 @@
       return node.textContent || "";
     }
 
-    // Try innerText first
-    let t = "";
-    try {
-      t = node.innerText || "";
-    } catch (e) {}
-    if (t && t.trim()) return t;
+    // Skip script, style, buttons, and icons from text extraction
+    if (node.tagName === "SCRIPT" || node.tagName === "STYLE" || node.tagName === "NOSCRIPT") {
+      return "";
+    }
+    if (node.tagName === "BUTTON" || node.getAttribute?.("role") === "button" || node.tagName === "MAT-ICON") {
+      return "";
+    }
 
-    // If node has shadowRoot, traverse into shadowRoot
+    // If node has shadowRoot, always traverse into shadowRoot
     if (node.shadowRoot) {
       const st = extractDeepText(node.shadowRoot);
       if (st && st.trim()) return st;
     }
 
-    // If node has childNodes, traverse recursively
+    // If leaf-like element with innerText
+    if (!node.shadowRoot && node.children && node.children.length === 0) {
+      return (node.innerText || node.textContent || "");
+    }
+
+    // Traverse children
     const children = node.childNodes || [];
     let combined = "";
     for (let i = 0; i < children.length; i++) {
@@ -263,7 +269,11 @@
     }
     if (combined && combined.trim()) return combined;
 
-    return node.textContent || "";
+    try {
+      return node.innerText || node.textContent || "";
+    } catch (e) {
+      return node.textContent || "";
+    }
   }
 
   async function findChatInput(maxWaitMs = 3500) {
@@ -741,12 +751,12 @@
     if (isNavigationOrSidebar(el)) return false;
 
     // Reject anything inside form, bottom bar, input area, or user queries
-    if (el.closest("form, .bottom-bar, .input-area, .chat-box-input, .input-container, mat-form-field, rich-textarea, user-query, .user-query, [user], discovery-engine-input")) {
+    if (el.closest("form, .bottom-bar, .input-area, .chat-box-input, .input-container, mat-form-field, rich-textarea, user-query, .user-query, [user], discovery-engine-input, [class*='user-query'], [class*='user-message']")) {
       return false;
     }
 
-    // Reject if it contains input controls or buttons (A real model response will never contain a textarea, input, or button)
-    if (el.querySelector("textarea, input, mat-form-field, rich-textarea, button, [role='button']")) {
+    // Reject if el is an input control itself
+    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable) {
       return false;
     }
 
