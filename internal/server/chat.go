@@ -19,20 +19,43 @@ import (
 
 const toolCallFence = "```tool_call"
 
+var toolCallFences = []string{
+	"```tool_call",
+	"<tool_call>",
+	"```json",
+}
+
 // partialToolFenceSuffixLen returns the length of the longest suffix of s
-// that is a proper prefix of "```tool_call", so streaming holds at most 11 bytes
-// while confirming whether backticks begin a structured tool_call block.
+// that is a proper prefix of any supported tool-call opening marker
+// ("```tool_call", "<tool_call>", "```json"), so streaming holds only a few bytes
+// while confirming whether characters begin a structured tool-call block.
 func partialToolFenceSuffixLen(s string) int {
-	maxCheck := len(toolCallFence) - 1
-	if len(s) < maxCheck {
-		maxCheck = len(s)
-	}
-	for k := maxCheck; k >= 1; k-- {
-		if strings.HasSuffix(s, toolCallFence[:k]) {
-			return k
+	best := 0
+	for _, fence := range toolCallFences {
+		maxCheck := len(fence) - 1
+		if len(s) < maxCheck {
+			maxCheck = len(s)
+		}
+		for k := maxCheck; k > best; k-- {
+			if strings.HasSuffix(s, fence[:k]) {
+				best = k
+				break
+			}
 		}
 	}
-	return 0
+	return best
+}
+
+func findToolFenceStart(s string) int {
+	earliest := -1
+	for _, fence := range toolCallFences {
+		if idx := strings.Index(s, fence); idx != -1 {
+			if earliest == -1 || idx < earliest {
+				earliest = idx
+			}
+		}
+	}
+	return earliest
 }
 
 func indexToolCalls(toolCalls []models.OpenAIToolCall) []models.OpenAIToolCall {
@@ -107,6 +130,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	strChoice, isStr := req.ToolChoice.(string)
 	isToolNone := isStr && strChoice == "none"
+	allowedTools := format.AllowedToolNames(req.Tools)
 
 	// Intercept automatic client title / topic generation requests (e.g. WorkBuddy)
 	// and fulfill them instantly without tying up the browser tab or polluting chat history.
@@ -208,6 +232,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			Prompt:      prepared.Prompt,
 			Model:       resolved.Name,
 			Attachments: prepared.Attachments,
+			NewChat:     prepared.NewChat,
 		}
 
 		if req.Stream {
@@ -277,6 +302,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			var fullText strings.Builder
+			var bufferedTail strings.Builder
 			hasTools := len(req.Tools) > 0 && !isToolNone
 			isBufferingToolCall := false
 			pending := ""
@@ -313,14 +339,16 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if isBufferingToolCall {
+					bufferedTail.WriteString(delta)
 					return nil
 				}
 
 				pending += delta
 
-				// Detect start of a ```tool_call block; flush any leading prose before the fence
-				if idx := strings.Index(pending, toolCallFence); idx != -1 {
+				// Detect start of a ```tool_call, <tool_call>, or ```json block; flush any leading prose
+				if idx := findToolFenceStart(pending); idx != -1 {
 					isBufferingToolCall = true
+					bufferedTail.WriteString(pending[idx:])
 					if idx > 0 {
 						leading := pending[:idx]
 						pending = ""
@@ -330,7 +358,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 					return nil
 				}
 
-				// Hold only a tiny trailing suffix if it could be the opening of ```tool_call
+				// Hold only a tiny trailing suffix if it could be the opening of a tool fence
 				hold := partialToolFenceSuffixLen(pending)
 				if len(pending) > hold {
 					toEmit := pending[:len(pending)-hold]
@@ -345,11 +373,11 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 			if emitErr == nil {
 				if strings.TrimSpace(fullText.String()) != "" {
-					a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
+					a.recordBridgeTurnSuccess(prepared)
 				}
 				if hasTools {
 					if isBufferingToolCall {
-						cleanText, toolCalls := format.ParseToolCalls(fullText.String())
+						_, toolCalls := format.ParseToolCallsWithAllowed(fullText.String(), allowedTools)
 						if len(toolCalls) > 0 {
 							tcChunk := models.OpenAIChatResponse{
 								ID:      cid,
@@ -384,9 +412,10 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 							}
 							_ = safeWriteSSE(endChunk)
 						} else {
-							// Fence did not contain valid JSON tool_call; flush full text if nothing was streamed
-							if !streamedAny && cleanText != "" {
-								_ = emitContent(cleanText)
+							// Fence did not contain a valid declared tool call (e.g. normal ```json``` snippet);
+							// flush the exact buffered remainder verbatim so nothing is dropped or duplicated.
+							if tail := bufferedTail.String(); tail != "" {
+								_ = emitContent(tail)
 							}
 							stopReason := "stop"
 							endChunk := models.OpenAIChatResponse{
@@ -482,12 +511,12 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.TrimSpace(text) != "" {
-			a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
+			a.recordBridgeTurnSuccess(prepared)
 		}
 
 		var toolCalls []models.OpenAIToolCall
 		if len(req.Tools) > 0 && text != "" && !isToolNone {
-			text, toolCalls = format.ParseToolCalls(text)
+			text, toolCalls = format.ParseToolCallsWithAllowed(text, allowedTools)
 		}
 
 		msg := models.OpenAIMessage{
@@ -607,7 +636,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	var toolCalls []models.OpenAIToolCall
 	if len(req.Tools) > 0 && text != "" && !isToolNone {
-		text, toolCalls = format.ParseToolCalls(text)
+		text, toolCalls = format.ParseToolCallsWithAllowed(text, allowedTools)
 	}
 
 	msg := models.OpenAIMessage{

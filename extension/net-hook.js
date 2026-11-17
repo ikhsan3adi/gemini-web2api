@@ -159,10 +159,25 @@
 
   const RE_CODE_EXEC = /```(?:python|javascript|text)\?code_(?:reference|stdout)&code_event_index=\d+\n[\s\S]*?```\n?/g;
   const RE_CARD_CONTENT = /http:\/\/googleusercontent\.com\/card_content\/\d+\n?/g;
+  const RE_DISCOVERY_ROUTING_SECTION = /(?:^|\n)[ \t]*(?:I am (?:transferring your request|checking the available tools and integrations)[^\n]*\r?\n)?[ \t]*\[\[\/?section(?::[^\]]*)?\]\][ \t]*\r?\n?/gi;
+  const RE_DISCOVERY_STANDALONE_ROUTING = /^[ \t]*I am (?:transferring your request to [^\n]+|checking the available tools and integrations in this environment[^\n]*)[ \t]*$/i;
 
   function cleanBardText(text) {
     if (!text) return "";
     return text.replace(RE_CODE_EXEC, "").replace(RE_CARD_CONTENT, "");
+  }
+
+  function cleanDiscoveryText(text) {
+    if (!text) return "";
+    const raw = String(text);
+    if (RE_DISCOVERY_STANDALONE_ROUTING.test(raw.trim())) {
+      return "";
+    }
+    const cleaned = raw.replace(RE_DISCOVERY_ROUTING_SECTION, "");
+    if (cleaned !== raw) {
+      return cleaned.replace(/^\n+/, "");
+    }
+    return raw;
   }
 
   function extractBardTextsFromLine(line) {
@@ -258,13 +273,18 @@
             const role = String(content.role || "").toLowerCase();
             if (role === "user") continue;
 
-            if (content.thought === true) {
+            if (content.thought === true || gc.thought === true || reply.thought === true) {
               sawThought = true;
               continue;
             }
 
             if (typeof content.text === "string" && content.text.length > 0) {
-              chunkAnswerText += content.text;
+              const cleaned = cleanDiscoveryText(content.text);
+              if (cleaned.length > 0) {
+                chunkAnswerText += cleaned;
+              } else {
+                sawThought = true;
+              }
             }
           }
 
@@ -279,7 +299,10 @@
 
         const answerText = answer.answerText || answer.answer_text;
         if (typeof answerText === "string" && answerText.length > 0) {
-          emitIncrementalOrDedup(answerText, true);
+          const cleanedAnswer = cleanDiscoveryText(answerText);
+          if (cleanedAnswer.length > 0) {
+            emitIncrementalOrDedup(cleanedAnswer, true);
+          }
         }
 
         if (answerState === "FAILED") {
@@ -413,6 +436,7 @@
       createJsonObjectExtractor,
       extractBardTextsFromLine,
       cleanBardText,
+      cleanDiscoveryText,
       createStreamProcessor
     };
     return;

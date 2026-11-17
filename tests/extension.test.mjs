@@ -938,5 +938,101 @@ test("Upload injection dispatches change-only on file input and single drop targ
   assert.equal(/for\s*\(\s*const\s+target\s+of\s+dropTargets\s*\)/.test(bridgeSrc), false);
 });
 
+test("cleanDiscoveryText strips Vertex AI Search [[section:...]] and internal sub-agent transfer noise", () => {
+  const noisy =
+    "I am transferring your request to read and process the uploaded file.\n" +
+    "[[section:Reading uploaded file context]]\n" +
+    "```tool_call\n{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}\n```";
+  const cleaned = netHook.cleanDiscoveryText(noisy);
+  assert.equal(cleaned.includes("[[section:"), false);
+  assert.equal(cleaned.includes("transferring your request"), false);
+  assert.ok(cleaned.includes("\"name\":\"list_dir\""));
+
+  // Standalone routing narration is dropped completely
+  assert.equal(
+    netHook.cleanDiscoveryText("I am checking the available tools and integrations in this environment to see if local tools are accessible."),
+    ""
+  );
+
+  // Normal streaming delta with leading newline is preserved untouched
+  assert.equal(netHook.cleanDiscoveryText("\n2. Second item"), "\n2. Second item");
+
+  // Stream processor emits clean tool_call without [[section:...]] noise
+  const events = [];
+  const proc = netHook.createStreamProcessor("discovery_json", "https://content-discoveryengine.googleapis.com/widgetStreamAssist", (type, payload) => {
+    events.push({ type, payload });
+  });
+  proc.feed(
+    JSON.stringify({
+      streamAssistResponse: {
+        answer: {
+          state: "IN_PROGRESS",
+          replies: [
+            { groundedContent: { content: { role: "model", text: "I am checking the available tools and integrations in this environment.\n[[section:Checking available environment tools]]\n" } } }
+          ]
+        }
+      }
+    }) + "\n" +
+    JSON.stringify({
+      streamAssistResponse: {
+        answer: {
+          state: "SUCCEEDED",
+          replies: [
+            { groundedContent: { content: { role: "model", text: "```tool_call\n{\"name\":\"list_dir\",\"arguments\":{}}\n```" } } }
+          ]
+        }
+      }
+    })
+  );
+  proc.finish();
+
+  const deltas = events.filter((e) => e.type === "delta").map((e) => e.payload.text).join("");
+  assert.equal(deltas.includes("[[section:"), false);
+  assert.ok(deltas.includes("```tool_call"));
+});
+
+test("findNewChatButton finds Shadow DOM New Chat button and ignores external/delete/message elements", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  // Decoys that MUST be ignored:
+  const extLink = el("a", {
+    href: "https://blog.google/innovation-and-ai/new-chat/",
+    target: "_blank",
+    "aria-label": "New chat"
+  });
+  extLink.appendChild(txt("New chat"));
+  doc.body.appendChild(extLink);
+
+  const deleteBtn = el("button", { "aria-label": "Delete chat" });
+  deleteBtn.appendChild(txt("Delete chat"));
+  doc.body.appendChild(deleteBtn);
+
+  const msgResp = el("model-response");
+  const fakeBtnInMsg = el("button");
+  fakeBtnInMsg.appendChild(txt("New chat"));
+  msgResp.appendChild(fakeBtnInMsg);
+  doc.body.appendChild(msgResp);
+
+  // None of the decoys should match
+  assert.equal(bridge.findNewChatButton(doc), null);
+
+  // Genuine Shadow DOM sidebar New Chat button on Gemini Enterprise
+  const appHost = el("ucs-app-shell");
+  const shadow = appHost.attachShadow();
+  const nav = el("nav", { class: "sidebar-rail" });
+  const toggleBtn = el("button", { "aria-label": "Main menu" });
+  const newChatBtn = el("button", { "aria-label": "New chat" });
+  newChatBtn.appendChild(txt("New chat"));
+  nav.appendChild(toggleBtn);
+  nav.appendChild(newChatBtn);
+  shadow.appendChild(nav);
+  doc.body.appendChild(appHost);
+
+  assert.equal(bridge.findSidebarToggleButton(doc), toggleBtn);
+  assert.equal(bridge.findNewChatButton(doc), newChatBtn);
+});
+
+
+
 
 

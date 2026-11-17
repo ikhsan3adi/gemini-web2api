@@ -570,7 +570,9 @@ func TestBridgeLargeCodeAutoUploadAndRefreshOnEdit(t *testing.T) {
 
 	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_code", "1")
 
+	var history []any
 	sendTurn := func(userPrompt string) *bridge.Request {
+		history = append(history, map[string]any{"role": "user", "content": userPrompt})
 		ch := make(chan *bridge.Request, 1)
 		go func() {
 			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_code", "1", 2*time.Second)
@@ -583,7 +585,7 @@ func TestBridgeLargeCodeAutoUploadAndRefreshOnEdit(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{
 			"model":    "gemini-4-hydrogen",
 			"stream":   false,
-			"messages": []any{map[string]any{"role": "user", "content": userPrompt}},
+			"messages": history,
 		})
 		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
 		httpReq.RemoteAddr = "127.0.0.1:54321"
@@ -593,6 +595,7 @@ func TestBridgeLargeCodeAutoUploadAndRefreshOnEdit(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
+		history = append(history, map[string]any{"role": "assistant", "content": "ok"})
 		return <-ch
 	}
 
@@ -934,4 +937,265 @@ func TestBridgeHistoricalAPIAttachmentNotReuploadedWhenSystemPromptChanges(t *te
 		t.Fatalf("turn 2 must NOT re-upload historical report.pdf, got %d attachment(s): %+v", len(req2.Attachments), req2.Attachments)
 	}
 }
+
+func TestSpilloverNeverBuriesToolUseHeaderWhenToolsAreLarge(t *testing.T) {
+	// Even when # Tool Use + Available tools exceeds maxChars, a short user prompt
+	// must NEVER be dumped into full_prompt_context.txt (which caused Vertex AI Search
+	// to route the prompt into its passive file-reader sub-agent and break tool calls).
+	largeToolHeader := "# Tool Use\n\nAvailable tools:\n[" + strings.Repeat(`{"name":"tool","desc":"desc"},`, 120) + "{}]"
+	prompt := largeToolHeader + "\n\nlook into my sidebar here, retain the local files that store these 3 existing chats, others dlt"
+
+	outPrompt, att := SpilloverOversizedPrompt(prompt, 2000, false)
+	if att != nil {
+		t.Fatalf("expected NO spillover attachment when only # Tool Use header is large and user body is short, got %+v", att)
+	}
+	if outPrompt != prompt || !strings.Contains(outPrompt, "# Tool Use") {
+		t.Errorf("expected prompt with # Tool Use header to remain completely inline")
+	}
+}
+
+func TestBridgeDeltaUserFollowUpIncludesLocalBridgeToolReminder(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeDeltaContext = true
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_agent", "1")
+
+	tools := []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "list_dir", "description": "List directory"}},
+		map[string]any{"type": "function", "function": map[string]any{"name": "delete_file", "description": "Delete a file"}},
+	}
+
+	runTurn := func(msgs []any, reply string) *bridge.Request {
+		ch := make(chan *bridge.Request, 1)
+		go func() {
+			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_agent", "1", 2*time.Second)
+			ch <- req
+			if req != nil {
+				_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: reply, Done: true})
+			}
+		}()
+		raw, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   false,
+			"tools":    tools,
+			"messages": msgs,
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return <-ch
+	}
+
+	msgs1 := []any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "check my chats"},
+	}
+	_ = runTurn(msgs1, "Which folder?")
+
+	// Turn 2: user follow-up ("use local tools in workbuddy") -> delta prompt includes compact bridge reminder
+	msgs2 := append(append([]any{}, msgs1...),
+		map[string]any{"role": "assistant", "content": "Which folder?"},
+		map[string]any{"role": "user", "content": "use local tools in workbuddy"},
+	)
+	req2 := runTurn(msgs2, "```tool_call\n{\"name\":\"list_dir\",\"arguments\":{}}\n```")
+	if req2 == nil {
+		t.Fatal("expected turn 2 bridge request")
+	}
+	if strings.Contains(req2.Prompt, "# Tool Use") {
+		t.Errorf("turn 2 delta prompt should NOT repeat full # Tool Use block, got %q", req2.Prompt)
+	}
+	if !strings.Contains(req2.Prompt, "Local client bridge active") || !strings.Contains(req2.Prompt, "list_dir") {
+		t.Errorf("turn 2 follow-up user turn must include compact local bridge tool reminder, got %q", req2.Prompt)
+	}
+}
+
+func TestBridgeStreamingParsesJSONToolCallsAndFlushesNormalJSON(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	tools := []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "list_dir", "description": "List directory"}},
+	}
+
+	runStream := func(tabID string, chunks []string) string {
+		app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", tabID, "1")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", tabID, "1", 2*time.Second)
+			if req == nil {
+				return
+			}
+			for i, c := range chunks {
+				_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: c, Done: i == len(chunks)-1})
+			}
+		}()
+
+		raw, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   true,
+			"tools":    tools,
+			"messages": []any{map[string]any{"role": "user", "content": "list files"}},
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		<-done
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	// Case 1: Model uses ```json``` for a declared tool -> must emit finish_reason: tool_calls
+	sseTool := runStream("tab_stream_tc", []string{
+		"Checking folder.\n```js",
+		"on\n{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}\n```",
+	})
+	if !strings.Contains(sseTool, `"finish_reason":"tool_calls"`) || !strings.Contains(sseTool, `"name":"list_dir"`) {
+		t.Errorf("expected streaming SSE to parse declared ```json``` tool call, got: %s", sseTool)
+	}
+
+	// Case 2: Model outputs ordinary ```json``` config snippet -> must flush verbatim without dropping text
+	ssePlain := runStream("tab_stream_json", []string{
+		"Here is the config:\n```json\n",
+		"{\"name\":\"my_project\",\"count\":3}\n```",
+	})
+	if strings.Contains(ssePlain, `"finish_reason":"tool_calls"`) {
+		t.Errorf("ordinary ```json``` snippet must NOT emit tool_calls, got: %s", ssePlain)
+	}
+	if !strings.Contains(ssePlain, "my_project") || !strings.Contains(ssePlain, `"finish_reason":"stop"`) {
+		t.Errorf("ordinary ```json``` snippet must be flushed intact with stop finish_reason, got: %s", ssePlain)
+	}
+}
+
+func TestBridgeAutoNewChatSyncWhenClientStartsFreshConversation(t *testing.T) {
+	tmpDir := t.TempDir()
+	pdfPath := filepath.Join(tmpDir, "spec.pdf")
+	if err := os.WriteFile(pdfPath, []byte("%PDF-1.4\n%fresh-chat-sync\n%%EOF\n"), 0o600); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeDeltaContext = true
+	cfg.BridgeAutoNewChat = true
+	cfg.BridgeAutoUploadLocalFiles = true
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_newchat", "1")
+
+	run := func(msgs []any) *bridge.Request {
+		ch := make(chan *bridge.Request, 1)
+		go func() {
+			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_newchat", "1", 2*time.Second)
+			ch <- req
+			if req != nil {
+				_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "Done.", Done: true})
+			}
+		}()
+		raw, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   false,
+			"messages": msgs,
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.RemoteAddr = "127.0.0.1:54321"
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return <-ch
+	}
+
+	// Chat 1 Turn 1: fresh tab -> NewChat=false, attaches spec.pdf
+	c1t1 := run([]any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "Summarize " + pdfPath},
+	})
+	if c1t1.NewChat {
+		t.Errorf("first turn on a clean tab should have NewChat=false")
+	}
+	if len(c1t1.Attachments) != 1 {
+		t.Fatalf("chat 1 turn 1 expected 1 attachment, got %d", len(c1t1.Attachments))
+	}
+
+	// Chat 1 Turn 2: continuation -> NewChat=false, delta context, 0 duplicate attachments
+	c1t2 := run([]any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "Summarize " + pdfPath},
+		map[string]any{"role": "assistant", "content": "Done."},
+		map[string]any{"role": "user", "content": "Check section 2 of " + pdfPath},
+	})
+	if c1t2.NewChat {
+		t.Errorf("continuation turn in same chat must have NewChat=false")
+	}
+	if len(c1t2.Attachments) != 0 {
+		t.Errorf("continuation turn must not re-upload spec.pdf, got %d", len(c1t2.Attachments))
+	}
+
+	// Chat 2 Turn 1 (User clicked "New Chat" in WorkBuddy!):
+	// Must set NewChat=true, send full prompt, AND attach spec.pdf cleanly into the new Gemini chat!
+	c2t1 := run([]any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "Brand new task using " + pdfPath},
+	})
+	if !c2t1.NewChat {
+		t.Errorf("expected NewChat=true when WorkBuddy starts a brand-new conversation")
+	}
+	if !strings.Contains(c2t1.Prompt, "You are WorkBuddy.") {
+		t.Errorf("expected full prompt on new conversation, got %q", c2t1.Prompt)
+	}
+	if len(c2t1.Attachments) != 1 {
+		t.Fatalf("expected spec.pdf to be uploaded into the fresh Gemini chat, got %d attachments", len(c2t1.Attachments))
+	}
+
+	// Chat 2 Turn 2: continuation of Chat 2 -> NewChat=false, delta context works again!
+	c2t2 := run([]any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "Brand new task using " + pdfPath},
+		map[string]any{"role": "assistant", "content": "Done."},
+		map[string]any{"role": "user", "content": "Follow up on Chat 2"},
+	})
+	if c2t2.NewChat {
+		t.Errorf("turn 2 of chat 2 must have NewChat=false")
+	}
+	if strings.Contains(c2t2.Prompt, "You are WorkBuddy.") {
+		t.Errorf("turn 2 of chat 2 should use delta context, got %q", c2t2.Prompt)
+	}
+
+	// Chat 3 Turn 1: Even if user types the EXACT same first prompt after a multi-turn chat,
+	// dropping from 2 user turns back to 1 triggers NewChat=true!
+	c3t1 := run([]any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "Brand new task using " + pdfPath},
+	})
+	if !c3t1.NewChat {
+		t.Errorf("expected NewChat=true when dropping from multi-turn chat back to Turn 1")
+	}
+}
+
+
 

@@ -438,13 +438,16 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 // SpilloverOversizedPrompt moves oversized code / tool-result prompts (> maxChars)
 // into a UTF-8 file attachment so Gemini receives 100% verbatim text without hitting
 // browser composer character limits or triggering giant DOM paste slowdowns.
+// IMPORTANT: Never moves `# Tool Use` / `Available tools` into a file attachment,
+// because Vertex AI Search routes uploaded `.txt` files through its passive file-reader
+// sub-agent and stops emitting structured ```tool_call``` blocks.
 func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compactPrompt string, att *bridge.Attachment) {
 	if maxChars <= 0 || len(prompt) <= maxChars {
 		return prompt, nil
 	}
 
-	// On a full prompt that starts with # Tool Use, keep the # Tool Use header inline
-	// (if reasonably sized) and spill only the oversized conversation/code body to a file.
+	// On a full prompt that starts with # Tool Use, ALWAYS keep the # Tool Use header inline
+	// and spill ONLY a genuinely massive conversation/code body to a file.
 	if !isDelta && strings.HasPrefix(prompt, "# Tool Use") {
 		if availIdx := strings.Index(prompt, "\nAvailable tools:\n"); availIdx != -1 {
 			afterAvail := availIdx + len("\nAvailable tools:\n")
@@ -452,7 +455,7 @@ func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compac
 				headerEnd := afterAvail + splitRel
 				header := prompt[:headerEnd]
 				body := strings.TrimSpace(prompt[headerEnd+2:])
-				if len(body) > maxChars/2 && len(header) <= maxChars {
+				if len(body) > maxChars/2 {
 					data := []byte(body)
 					if len(data) <= maxBridgeAttachmentBytes {
 						filename := "code_context.txt"
@@ -470,6 +473,8 @@ func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compac
 				}
 			}
 		}
+		// Never bury `# Tool Use` inside full_prompt_context.txt when the body itself is small.
+		return prompt, nil
 	}
 
 	// Delta turns (e.g. massive [Tool result for read_file]) or oversized single prompts:
@@ -610,17 +615,59 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 }
 
 type preparedBridgeTurn struct {
-	Prompt        string
-	Attachments   []bridge.Attachment
-	SessionClient string
-	SessionConv   string
-	Fingerprints  []string
-	UploadedSigs  map[string]string
+	Prompt           string
+	Attachments      []bridge.Attachment
+	NewChat          bool
+	SessionClient    string
+	SessionConv      string
+	Fingerprints     []string
+	UserFingerprints []string
+	UploadedSigs     map[string]string
+}
+
+// ExtractUserFingerprints returns the per-user-message digests from ConversationFingerprints
+// and reports whether the request contains any assistant or tool history.
+func ExtractUserFingerprints(req models.OpenAIChatRequest, allFingerprints []string) ([]string, bool) {
+	var userFPs []string
+	hasAssistantOrTool := false
+	for i, msg := range req.Messages {
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		switch role {
+		case "", "user":
+			if i+1 < len(allFingerprints) {
+				userFPs = append(userFPs, allFingerprints[i+1])
+			}
+		case "assistant", "tool":
+			hasAssistantOrTool = true
+		}
+	}
+	return userFPs, hasAssistantOrTool
+}
+
+func (a *App) recordBridgeTurnSuccess(p preparedBridgeTurn) {
+	a.Bridge.RecordTurnSuccessWithConversation(
+		p.SessionClient,
+		p.SessionConv,
+		p.Fingerprints,
+		p.UserFingerprints,
+		p.UploadedSigs,
+		p.NewChat,
+	)
 }
 
 func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest, fullPrompt string, apiAttachments []format.Image) preparedBridgeTurn {
 	sessClient, sessConvGen, alreadyUploaded := a.Bridge.ActiveSession()
 	fingerprints := ConversationFingerprints(req)
+	userFPs, hasAssistantOrTool := ExtractUserFingerprints(req, fingerprints)
+
+	// Detect when the client (e.g. WorkBuddy) started a brand-new chat while the open
+	// browser tab still holds an older conversation, so Gemini starts a clean New Chat
+	// with zero stale memory or leftover files from the previous chat.
+	newChat := a.Cfg.BridgeAutoNewChat && a.Bridge.IsNewConversation(userFPs, hasAssistantOrTool)
+	if newChat {
+		a.Logf("Bridge detected new client conversation — instructing browser tab to start a fresh chat")
+		alreadyUploaded = nil
+	}
 
 	bridgePrompt := fullPrompt
 	activeAtts := apiAttachments
@@ -628,7 +675,7 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 
 	// Delta-context optimization: if the active browser tab already holds the exact
 	// tool definitions and leading conversation turns, send only the newly appended turns.
-	if a.Cfg.BridgeDeltaContext {
+	if a.Cfg.BridgeDeltaContext && !newChat {
 		matchedPrefix := a.Bridge.MatchDeltaPrefix(fingerprints)
 		// Element 0 is the tools digest, so matchedPrefix > 1 means at least 1 message matched.
 		if matchedPrefix > 1 {
@@ -636,6 +683,15 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 			if matchedMsgs < len(req.Messages) {
 				deltaPrompt, deltaAtts := format.MessagesToDeltaPrompt(req.Messages[matchedMsgs:], req.ToolChoice)
 				if strings.TrimSpace(deltaPrompt) != "" {
+					// On follow-up user turns in tool-enabled sessions (e.g. "use local tools in workbuddy"),
+					// include a compact one-line bridge reminder so Gemini Enterprise keeps emitting
+					// ```tool_call``` blocks instead of refusing as a cloud-only environment.
+					lastRole := req.Messages[len(req.Messages)-1].Role
+					if len(req.Tools) > 0 && (lastRole == "user" || lastRole == "") {
+						if reminder := format.BuildDeltaToolReminder(req.Tools, req.ToolChoice); reminder != "" {
+							deltaPrompt = deltaPrompt + "\n\n" + reminder
+						}
+					}
 					bridgePrompt = deltaPrompt
 					activeAtts = deltaAtts
 					isDelta = true
@@ -739,11 +795,13 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	}
 
 	return preparedBridgeTurn{
-		Prompt:        bridgePrompt,
-		Attachments:   attachments,
-		SessionClient: sessClient,
-		SessionConv:   sessConvGen,
-		Fingerprints:  fingerprints,
-		UploadedSigs:  uploadedSigs,
+		Prompt:           bridgePrompt,
+		Attachments:      attachments,
+		NewChat:          newChat,
+		SessionClient:    sessClient,
+		SessionConv:      sessConvGen,
+		Fingerprints:     fingerprints,
+		UserFingerprints: userFPs,
+		UploadedSigs:     uploadedSigs,
 	}
 }

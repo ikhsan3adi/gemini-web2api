@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"regexp"
@@ -357,6 +358,154 @@ func formatMessagePart(msg models.OpenAIMessage, contentStr string) string {
 	}
 }
 
+func truncateOneLine(s string, maxRunes int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
+type compactToolDef struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Params      map[string]string `json:"params,omitempty"`
+}
+
+// compactToolDefinitions keeps every tool's name, concise description, and parameter
+// names/types/required markers while shrinking verbose OpenAI JSON Schemas by ~70-85%
+// so the entire # Tool Use header stays inline instead of spilling to a file attachment.
+func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
+	fullJSON, _ := json.Marshal(toolDefs)
+	if len(fullJSON) <= 10000 {
+		return fullJSON
+	}
+
+	buildCompact := func(maxDesc, maxParamDesc int) []byte {
+		out := make([]compactToolDef, len(toolDefs))
+		for i, fn := range toolDefs {
+			paramsMap, _ := fn.Parameters.(map[string]any)
+			required := make(map[string]bool)
+			if reqRaw, ok := paramsMap["required"]; ok {
+				switch arr := reqRaw.(type) {
+				case []any:
+					for _, item := range arr {
+						if name, ok := item.(string); ok {
+							required[name] = true
+						}
+					}
+				case []string:
+					for _, name := range arr {
+						required[name] = true
+					}
+				}
+			}
+
+			var params map[string]string
+			if props, ok := paramsMap["properties"].(map[string]any); ok && len(props) > 0 {
+				params = make(map[string]string, len(props))
+				for pName, pRaw := range props {
+					pType := "any"
+					pDesc := ""
+					if pMap, ok := pRaw.(map[string]any); ok {
+						if t, ok := pMap["type"].(string); ok && t != "" {
+							pType = t
+						}
+						if maxParamDesc > 0 {
+							if d, ok := pMap["description"].(string); ok && d != "" {
+								pDesc = truncateOneLine(d, maxParamDesc)
+							}
+						}
+					}
+					spec := pType
+					if required[pName] {
+						spec += "*"
+					}
+					if pDesc != "" {
+						spec += " - " + pDesc
+					}
+					params[pName] = spec
+				}
+			}
+
+			out[i] = compactToolDef{
+				Name:        fn.Name,
+				Description: truncateOneLine(fn.Description, maxDesc),
+				Params:      params,
+			}
+		}
+		b, _ := json.Marshal(out)
+		return b
+	}
+
+	compacted := buildCompact(160, 60)
+	if len(compacted) > 24000 {
+		compacted = buildCompact(80, 0)
+	}
+	log.Printf("Compacted %d tool definitions from %d bytes to %d bytes (preserving parameter names)", len(toolDefs), len(fullJSON), len(compacted))
+	return compacted
+}
+
+// AllowedToolNames extracts the set of declared tool function names from an OpenAI request.
+func AllowedToolNames(tools []models.OpenAITool) map[string]bool {
+	if len(tools) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name == "" {
+			name = strings.TrimSpace(tool.Name)
+		}
+		if name != "" {
+			allowed[name] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+	return allowed
+}
+
+// BuildDeltaToolReminder returns a compact one-line reminder for follow-up user messages
+// in a delta-context session so Gemini Enterprise keeps emitting ```tool_call``` blocks
+// instead of refusing as a cloud-only chat.
+func BuildDeltaToolReminder(tools []models.OpenAITool, toolChoice any) string {
+	if strChoice, ok := toolChoice.(string); ok && strChoice == "none" {
+		return ""
+	}
+	if len(tools) == 0 {
+		return ""
+	}
+	var names []string
+	seen := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name == "" {
+			name = strings.TrimSpace(tool.Name)
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+		if len(names) >= 32 {
+			break
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[Local client bridge active: to access/modify local files or run commands, output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result. Available tools: %s]",
+		strings.Join(names, ", "),
+	)
+}
+
 func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 	var parts []string
 	var images []Image
@@ -384,28 +533,15 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 
 		if len(toolDefs) > 0 {
 			constraint := BuildToolChoiceInstruction(req.ToolChoice)
-			defsJSON, _ := json.Marshal(toolDefs)
-			// Tool slimming: if tool definitions exceed 30KB, re-marshal with name+description only.
-			if len(defsJSON) > 30000 {
-				log.Printf("Tool defs too large (%d bytes), slimming to name+description only", len(defsJSON))
-				slimmed := make([]models.OpenAIFunction, len(toolDefs))
-				for i, fn := range toolDefs {
-					slimmed[i] = models.OpenAIFunction{
-						Name:        fn.Name,
-						Description: fn.Description,
-					}
-				}
-				defsJSON, _ = json.Marshal(slimmed)
-			}
+			defsJSON := compactToolDefinitions(toolDefs)
 			parts = append(parts, fmt.Sprintf(
 				"# Tool Use\n\n"+
-					"You can call the following tools. Call format:\n"+
+					"An external local client bridge is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that tool on the user's local machine and returns the output in the next turn as `[Tool result for <name>]`.\n"+
+					"- You DO have local tool execution through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files/shell — call the tools below instead.\n"+
+					"- Call format:\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
-					"When calling tools:\n"+
-					"- Output ONLY the tool_call block(s).\n"+
-					"- Batch all independent reads, searches, or edits as multiple tool_call blocks in a SINGLE response to minimize round-trips.\n"+
-					"- For long code files: read directly attached files natively, or use search tools (grep) to jump to target lines instead of paginating chunk-by-chunk; prefer targeted edits over full-file rewrites, and avoid re-reading an entire file after an edit succeeds.\n"+
-					"- If a PDF, document, image, or source code file is already attached directly to this message, read the attached file directly instead of calling local tools to re-read or extract it.\n\n"+
+					"- Output ONLY the tool_call block(s) when calling tools. Batch independent calls in one response.\n"+
+					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it.\n\n"+
 					"Available tools:\n%s%s",
 				string(defsJSON),
 				constraint,
@@ -459,31 +595,62 @@ func MessagesToDeltaPrompt(deltaMessages []models.OpenAIMessage, toolChoice any)
 	return prompt, attachments
 }
 
-var reToolCall = regexp.MustCompile(`(?s)\x60\x60\x60tool_call\s*\n(.*?)\n\x60\x60\x60`)
+var (
+	reToolCall     = regexp.MustCompile("(?s)\\x60\\x60\\x60tool_call[ \\t]*\\r?\\n(.*?)\\r?\\n[ \\t]*\\x60\\x60\\x60")
+	reXMLToolCall  = regexp.MustCompile(`(?is)<tool_call>\s*(.*?)\s*</tool_call>`)
+	reJSONToolCall = regexp.MustCompile("(?s)\\x60\\x60\\x60json[ \\t]*\\r?\\n(.*?)\\r?\\n[ \\t]*\\x60\\x60\\x60")
+)
 
-// ParseToolCalls extracts tool calls from the raw string output of the model.
-// The model is instructed to output tool calls in markdown blocks e.g. ```tool_call\n{...}\n```.
-// This function parses those blocks, removes them from the text, and returns the cleaned text along with structured ToolCalls.
-func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
-	var toolCalls []models.OpenAIToolCall
-	matches := reToolCall.FindAllStringSubmatchIndex(text, -1)
-	if len(matches) == 0 {
-		return text, nil
+type rawToolCallPayload struct {
+	Name      string `json:"name"`
+	Arguments any    `json:"arguments"`
+}
+
+func decodeToolCallPayload(content string, requireAllowed bool, allowed map[string]bool) []models.OpenAIToolCall {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil
 	}
 
-	var cleanParts []string
-	lastEnd := 0
-
-	for _, m := range matches {
-		cleanParts = append(cleanParts, text[lastEnd:m[0]])
-		lastEnd = m[1]
-
-		content := strings.TrimSpace(text[m[2]:m[3]])
-		var data struct {
-			Name      string `json:"name"`
-			Arguments any    `json:"arguments"`
+	var out []models.OpenAIToolCall
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil
 		}
-		if err := json.Unmarshal([]byte(content), &data); err == nil && data.Name != "" {
+		rawTrim := strings.TrimSpace(string(raw))
+		if rawTrim == "" {
+			continue
+		}
+
+		var items []rawToolCallPayload
+		if strings.HasPrefix(rawTrim, "[") {
+			if err := json.Unmarshal(raw, &items); err != nil {
+				return nil
+			}
+		} else {
+			var single rawToolCallPayload
+			if err := json.Unmarshal(raw, &single); err != nil {
+				return nil
+			}
+			items = []rawToolCallPayload{single}
+		}
+
+		for _, data := range items {
+			name := strings.TrimSpace(data.Name)
+			if name == "" {
+				if requireAllowed {
+					return nil
+				}
+				continue
+			}
+			if requireAllowed && !allowed[name] {
+				return nil
+			}
 			var argsStr string
 			if str, ok := data.Arguments.(string); ok {
 				argsStr = str
@@ -493,19 +660,82 @@ func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
 			} else {
 				argsStr = "{}"
 			}
-
-			toolCalls = append(toolCalls, models.OpenAIToolCall{
+			out = append(out, models.OpenAIToolCall{
 				ID:   fmt.Sprintf("call_%s", RandHex(8)),
 				Type: "function",
 				Function: models.OpenAIToolCallFunction{
-					Name:      data.Name,
+					Name:      name,
 					Arguments: argsStr,
 				},
 			})
 		}
 	}
+	return out
+}
+
+func extractBlocksWithRegex(text string, re *regexp.Regexp, requireAllowed bool, allowed map[string]bool) (string, []models.OpenAIToolCall) {
+	matches := re.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text, nil
+	}
+
+	var toolCalls []models.OpenAIToolCall
+	var cleanParts []string
+	lastEnd := 0
+
+	for _, m := range matches {
+		blockCalls := decodeToolCallPayload(text[m[2]:m[3]], requireAllowed, allowed)
+		if len(blockCalls) == 0 {
+			// Leave non-tool-call blocks (e.g. ordinary ```json``` snippets) intact in text
+			if requireAllowed {
+				continue
+			}
+			cleanParts = append(cleanParts, text[lastEnd:m[0]])
+			lastEnd = m[1]
+			continue
+		}
+		cleanParts = append(cleanParts, text[lastEnd:m[0]])
+		lastEnd = m[1]
+		toolCalls = append(toolCalls, blockCalls...)
+	}
+
+	if len(toolCalls) == 0 && requireAllowed {
+		return text, nil
+	}
 
 	cleanParts = append(cleanParts, text[lastEnd:])
 	clean := strings.TrimSpace(strings.Join(cleanParts, ""))
 	return clean, toolCalls
+}
+
+// ParseToolCalls extracts tool calls from the raw string output of the model.
+// Supports ```tool_call``` blocks (single object, array, or multiple JSON objects)
+// as well as <tool_call>...</tool_call> wrappers.
+func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
+	return ParseToolCallsWithAllowed(text, nil)
+}
+
+// ParseToolCallsWithAllowed extracts structured tool calls from model output.
+// In addition to ```tool_call``` and <tool_call> blocks, if allowedTools is non-empty
+// and no explicit tool_call blocks were found, it also accepts ```json``` blocks whose
+// "name" matches a declared tool in allowedTools.
+func ParseToolCallsWithAllowed(text string, allowedTools map[string]bool) (string, []models.OpenAIToolCall) {
+	clean, calls := extractBlocksWithRegex(text, reToolCall, false, nil)
+	if len(calls) > 0 {
+		return clean, calls
+	}
+
+	cleanXML, xmlCalls := extractBlocksWithRegex(text, reXMLToolCall, false, nil)
+	if len(xmlCalls) > 0 {
+		return cleanXML, xmlCalls
+	}
+
+	if len(allowedTools) > 0 {
+		cleanJSON, jsonCalls := extractBlocksWithRegex(text, reJSONToolCall, true, allowedTools)
+		if len(jsonCalls) > 0 {
+			return cleanJSON, jsonCalls
+		}
+	}
+
+	return text, nil
 }

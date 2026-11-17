@@ -1158,6 +1158,114 @@
     return bestItem;
   }
 
+  function isExternalLinkElement(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const target = String((el.getAttribute && el.getAttribute("target")) || "").toLowerCase();
+    if (target === "_blank") return true;
+    const href = String((el.getAttribute && el.getAttribute("href")) || "").trim();
+    if (!href) return false;
+    if (/^https?:\/\//i.test(href)) {
+      try {
+        if (typeof location !== "undefined" && location && location.hostname) {
+          const parsed = new URL(href);
+          if (parsed.hostname && parsed.hostname !== location.hostname) {
+            return true;
+          }
+        } else {
+          // Outside browser (unit tests): reject known external promo links
+          if (/blog\.google|support\.google/i.test(href)) return true;
+        }
+      } catch (e) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function findNewChatButton(root) {
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    const candidates = queryDeep('button, a, [role="button"], [role="menuitem"]', searchRoot);
+    let best = null;
+    let bestScore = 0;
+
+    for (const el of candidates) {
+      if (isOwnExtensionElement(el)) continue;
+      if (el.disabled || (el.getAttribute && el.getAttribute("aria-disabled") === "true")) continue;
+      if (isExternalLinkElement(el)) continue;
+      if (closestDeep(el, "message-content, model-response, [class*='promo'], [class*='announcement'], [class*='banner']")) {
+        continue;
+      }
+
+      const aria = String((el.getAttribute && el.getAttribute("aria-label")) || "").trim().toLowerCase();
+      const title = String((el.getAttribute && el.getAttribute("title")) || "").trim().toLowerCase();
+      const tooltip = String((el.getAttribute && el.getAttribute("data-tooltip")) || "").trim().toLowerCase();
+      const testId = String((el.getAttribute && el.getAttribute("data-test-id")) || "").trim().toLowerCase();
+      const text = String(extractControlLabel(el) || "").trim().toLowerCase();
+      const combined = `${aria} ${title} ${tooltip} ${testId} ${text}`.trim();
+
+      if (!combined || text.length > 60) continue;
+      if (/\b(delete|remove|rename|share|export|pin|archive|settings|help|sign out|logout)\b/.test(combined)) {
+        continue;
+      }
+
+      let score = 0;
+      if (
+        /^(?:start\s+a?\s*)?new\s+(?:chat|conversation)$/.test(aria) ||
+        /^(?:start\s+a?\s*)?new\s+(?:chat|conversation)$/.test(title) ||
+        /^(?:start\s+a?\s*)?new\s+(?:chat|conversation)$/.test(text) ||
+        /^(?:新对话|新建对话|开启新对话|新聊天|开始新对话)$/.test(aria) ||
+        /^(?:新对话|新建对话|开启新对话|新聊天|开始新对话)$/.test(text) ||
+        testId.includes("new-chat") ||
+        testId.includes("new_chat") ||
+        testId.includes("new-conversation")
+      ) {
+        score = 130;
+      } else if (/\bnew\s+(?:chat|conversation)\b/.test(aria) || /\bnew\s+(?:chat|conversation)\b/.test(title) || /\bnew\s+(?:chat|conversation)\b/.test(tooltip)) {
+        score = 100;
+      } else if (/\bnew\s+(?:chat|conversation)\b/.test(text) || /(?:新对话|新建对话|开启新对话|新聊天)/.test(combined)) {
+        score = 80;
+      } else if (
+        (/\bedit_square\b/.test(text) || /\badd_comment\b/.test(text)) &&
+        closestDeep(el, "nav, aside, header, [class*='side'], [class*='rail'], [class*='drawer'], [class*='nav']")
+      ) {
+        score = 60;
+      }
+
+      if (score <= 0) continue;
+
+      if (closestDeep(el, "nav, aside, header, [class*='side'], [class*='rail'], [class*='drawer'], [class*='nav']")) {
+        score += 15;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+
+    return best;
+  }
+
+  function findSidebarToggleButton(root) {
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    const candidates = queryDeep('button, [role="button"]', searchRoot);
+    for (const el of candidates) {
+      if (isOwnExtensionElement(el)) continue;
+      if (el.disabled || (el.getAttribute && el.getAttribute("aria-disabled") === "true")) continue;
+      const aria = String((el.getAttribute && el.getAttribute("aria-label")) || "").trim().toLowerCase();
+      const title = String((el.getAttribute && el.getAttribute("title")) || "").trim().toLowerCase();
+      const combined = `${aria} ${title}`.trim();
+      if (/\b(main menu|open menu|expand menu|open sidebar|expand sidebar|navigation menu|toggle sidebar|show sidebar)\b/.test(combined)) {
+        return el;
+      }
+    }
+    return null;
+  }
+
   // Export pure/DOM helpers for Node.js unit testing
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
@@ -1189,7 +1297,9 @@
       findModelOption,
       findModelTriggerElement,
       findAttachButton,
-      findUploadMenuOption
+      findUploadMenuOption,
+      findNewChatButton,
+      findSidebarToggleButton
     };
     return;
   }
@@ -2265,7 +2375,86 @@
     };
   }
 
-  async function handlePromptRequest(reqId, prompt, model, attachments) {
+  async function startFreshChatOnPage() {
+    const beforeUrl = `${location.pathname}${location.search}`;
+    let beforeResponses = 0;
+    try {
+      beforeResponses = findResponseElements(lastFocusedInput, "").length;
+    } catch (e) {}
+
+    let newChatBtn = findNewChatButton(document);
+    if (!newChatBtn) {
+      const toggleBtn = findSidebarToggleButton(document);
+      if (toggleBtn) {
+        simulateClick(toggleBtn);
+        await new Promise((r) => setTimeout(r, 320));
+        newChatBtn = findNewChatButton(document);
+      }
+    }
+
+    let triggered = false;
+    if (newChatBtn) {
+      console.log("[Web2API Bridge] Starting fresh Gemini chat via New Chat button...");
+      simulateClick(newChatBtn);
+      triggered = true;
+    } else if (location.hostname.includes("gemini.google.com")) {
+      // Fallback: Gemini Web's built-in Ctrl/Cmd+Shift+O New Chat shortcut
+      console.log("[Web2API Bridge] Starting fresh Gemini chat via Shift+O shortcut...");
+      const isMac = /mac/i.test(navigator.platform || "");
+      const evOpts = {
+        key: "O",
+        code: "KeyO",
+        shiftKey: true,
+        ctrlKey: !isMac,
+        metaKey: isMac,
+        bubbles: true,
+        cancelable: true
+      };
+      document.dispatchEvent(new KeyboardEvent("keydown", evOpts));
+      document.dispatchEvent(new KeyboardEvent("keyup", evOpts));
+      triggered = true;
+    }
+
+    if (triggered) {
+      const deadline = Date.now() + 2400;
+      const prevInput = lastFocusedInput;
+      while (Date.now() < deadline) {
+        const curUrl = `${location.pathname}${location.search}`;
+        if (curUrl !== beforeUrl) break;
+        if (prevInput && !containsDeep(document, prevInput)) break;
+        try {
+          if (beforeResponses > 0 && findResponseElements(null, "").length < beforeResponses) {
+            break;
+          }
+        } catch (e) {}
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 350));
+    } else {
+      console.warn("[Web2API Bridge] Could not locate New Chat button on page; continuing on current view.");
+    }
+
+    // Reset local input/URL trackers so the new chat starts cleanly without
+    // bumping convGen mid-request (the server resets session state via resetSession).
+    lastFocusedInput = null;
+    lastConvUrlKey = `${location.pathname}${location.search}`;
+    hadResponsesInConv = false;
+    hadDomResponsesInConv = false;
+    return triggered;
+  }
+
+  async function handlePromptRequest(reqId, prompt, model, attachments, newChat) {
+    // 0. If WorkBuddy/client started a brand-new chat, open a fresh Gemini chat first
+    // so previous conversation memory & files never bleed into the new chat!
+    if (newChat) {
+      setStatus("busy", "Web2API: Starting fresh chat... ✨");
+      try {
+        await startFreshChatOnPage();
+      } catch (e) {
+        console.warn("[Web2API Bridge] Error starting fresh chat:", e);
+      }
+    }
+
     // A. Switch model dropdown if the requested model specifies a known family
     try {
       await ensureModelSelected(model);
@@ -2274,7 +2463,7 @@
     }
 
     // B. Locate Prompt Input Area
-    const inputArea = await findChatInput(3500);
+    const inputArea = await findChatInput(4000);
 
     // B2. Directly upload any attached PDFs/documents/images to the Gemini page
     let effectivePrompt = prompt;
@@ -2591,7 +2780,7 @@
           activeReqId = data.id;
           setStatus("busy", "Web2API: Answering request...");
           try {
-            await handlePromptRequest(data.id, data.prompt, data.model, data.attachments);
+            await handlePromptRequest(data.id, data.prompt, data.model, data.attachments, Boolean(data.new_chat));
           } catch (err) {
             console.error("[Web2API Bridge] Error processing prompt:", err);
             await sendChunk(data.id, "", true, (err && err.message) || "Failed to generate reply");

@@ -460,3 +460,88 @@ func TestMessagesToDeltaPromptSkipsPriorAssistant(t *testing.T) {
 		t.Errorf("delta prompt missing tool result, got %q", prompt)
 	}
 }
+
+func TestCompactToolDefinitionsPreservesParamsAndBridgeProtocol(t *testing.T) {
+	// 25 verbose WorkBuddy-like tools (> 15KB raw JSON) must compact cleanly while
+	// keeping every tool's parameter names & required markers AND explaining the local bridge.
+	var tools []models.OpenAITool
+	for i := 0; i < 25; i++ {
+		suffix := string(rune('a' + i))
+		tools = append(tools, models.OpenAITool{
+			Type: "function",
+			Function: models.OpenAIFunction{
+				Name:        "local_tool_" + suffix,
+				Description: "Execute local workspace operation " + strings.Repeat("with detailed guidance ", 15),
+				Parameters: map[string]any{
+					"type":     "object",
+					"required": []any{"target_path"},
+					"properties": map[string]any{
+						"target_path": map[string]any{"type": "string", "description": strings.Repeat("Absolute path on disk ", 8)},
+						"dry_run":     map[string]any{"type": "boolean", "description": "Preview changes before deleting"},
+					},
+				},
+			},
+		})
+	}
+
+	req := models.OpenAIChatRequest{
+		Tools:      tools,
+		ToolChoice: "auto",
+		Messages:   []models.OpenAIMessage{{Role: "user", Content: "Organize my files"}},
+	}
+	prompt, _, err := MessagesToPrompt(req)
+	if err != nil {
+		t.Fatalf("MessagesToPrompt error: %v", err)
+	}
+	if len(prompt) > 12000 {
+		t.Errorf("expected compacted tool prompt well under 12KB, got %d bytes", len(prompt))
+	}
+	if !strings.Contains(prompt, "local client bridge") || !strings.Contains(prompt, "NEVER refuse") {
+		t.Errorf("expected explicit local client bridge anti-refusal guidance in # Tool Use")
+	}
+	if !strings.Contains(prompt, `"target_path":"string*`) {
+		t.Errorf("expected compacted tool defs to preserve required parameter marker target_path:string*, got snippet: %q", prompt[:min(1200, len(prompt))])
+	}
+}
+
+func TestParseToolCallsMultiFormatAndJSONSafety(t *testing.T) {
+	allowed := AllowedToolNames([]models.OpenAITool{
+		{Type: "function", Function: models.OpenAIFunction{Name: "list_dir"}},
+		{Type: "function", Function: models.OpenAIFunction{Name: "delete_file"}},
+	})
+
+	// 1. JSON array inside ```tool_call```
+	arrayOut := "```tool_call\n[{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}},{\"name\":\"delete_file\",\"arguments\":{\"path\":\"old.json\"}}]\n```"
+	_, calls := ParseToolCallsWithAllowed(arrayOut, allowed)
+	if len(calls) != 2 || calls[0].Function.Name != "list_dir" || calls[1].Function.Name != "delete_file" {
+		t.Fatalf("expected 2 array tool calls, got %+v", calls)
+	}
+
+	// 2. <tool_call> XML wrapper
+	xmlOut := "Let me check.\n<tool_call>\n{\"name\":\"list_dir\",\"arguments\":{\"path\":\"/tmp\"}}\n</tool_call>"
+	cleanXML, xmlCalls := ParseToolCallsWithAllowed(xmlOut, allowed)
+	if len(xmlCalls) != 1 || xmlCalls[0].Function.Name != "list_dir" {
+		t.Fatalf("expected 1 XML tool call, got %+v", xmlCalls)
+	}
+	if strings.Contains(cleanXML, "<tool_call>") {
+		t.Errorf("clean text should strip <tool_call>, got %q", cleanXML)
+	}
+
+	// 3. ```json``` matching a declared tool name
+	jsonTool := "```json\n{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}\n```"
+	_, jsonCalls := ParseToolCallsWithAllowed(jsonTool, allowed)
+	if len(jsonCalls) != 1 || jsonCalls[0].Function.Name != "list_dir" {
+		t.Fatalf("expected declared ```json``` tool call to parse, got %+v", jsonCalls)
+	}
+
+	// 4. Ordinary ```json``` data snippet (not a declared tool) MUST NOT be treated as a tool call
+	normalJSON := "Here is your config:\n```json\n{\"name\":\"my-app\",\"version\":\"1.0.0\"}\n```"
+	cleanNormal, normalCalls := ParseToolCallsWithAllowed(normalJSON, allowed)
+	if len(normalCalls) != 0 {
+		t.Fatalf("ordinary JSON snippet must NOT parse as tool call, got %+v", normalCalls)
+	}
+	if cleanNormal != normalJSON {
+		t.Errorf("ordinary JSON snippet should remain untouched, got %q", cleanNormal)
+	}
+}
+

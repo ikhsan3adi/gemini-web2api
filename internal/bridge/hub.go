@@ -24,6 +24,7 @@ type Request struct {
 	Prompt      string       `json:"prompt"`
 	Model       string       `json:"model,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	NewChat     bool         `json:"new_chat,omitempty"`
 	CreatedAt   time.Time    `json:"created_at"`
 }
 
@@ -31,6 +32,7 @@ type GenerateOptions struct {
 	Prompt      string
 	Model       string
 	Attachments []Attachment
+	NewChat     bool
 }
 
 type Chunk struct {
@@ -82,9 +84,10 @@ type inFlightEntry struct {
 }
 
 type tabSession struct {
-	convGen       string
-	fingerprints  []string
-	uploadedFiles map[string]string // canonical path or "sha256:..." -> signature
+	convGen          string
+	fingerprints     []string
+	userFingerprints []string
+	uploadedFiles    map[string]string // canonical path or "sha256:..." -> signature
 }
 
 type Hub struct {
@@ -251,6 +254,7 @@ func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 	if convGen != "" {
 		if sess.convGen != "" && sess.convGen != convGen {
 			sess.fingerprints = nil
+			sess.userFingerprints = nil
 			sess.uploadedFiles = make(map[string]string)
 		}
 		sess.convGen = convGen
@@ -298,10 +302,37 @@ func (h *Hub) MatchDeltaPrefix(fingerprints []string) int {
 	return len(prev)
 }
 
+// IsNewConversation returns true when the client (e.g. WorkBuddy) started a brand-new
+// Turn-1 conversation while the open browser tab still holds a previous conversation.
+// Never triggers on multi-turn continuations (messages with assistant/tool history) or
+// identical Turn-1 retries.
+func (h *Hub) IsNewConversation(incomingUserFPs []string, hasAssistantOrTool bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	sess := h.ensureSessionLocked(h.activeClientID)
+	if len(sess.userFingerprints) == 0 {
+		return false
+	}
+	if hasAssistantOrTool || len(incomingUserFPs) != 1 {
+		return false
+	}
+	if len(sess.userFingerprints) > 1 {
+		return true
+	}
+	return incomingUserFPs[0] != sess.userFingerprints[0]
+}
+
 // RecordTurnSuccess saves the conversation prefix and uploaded file signatures for the
 // tab session so subsequent follow-up turns can send compact deltas and avoid
 // re-uploading unchanged files while automatically refreshing edited code files.
 func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string, uploadedSigs map[string]string) {
+	h.RecordTurnSuccessWithConversation(clientID, convGen, fingerprints, nil, uploadedSigs, false)
+}
+
+// RecordTurnSuccessWithConversation updates conversation fingerprints, user-message
+// fingerprints (for New Chat detection), and uploaded-file signatures. When resetSession
+// is true (the browser started a fresh chat), previous uploaded files are cleared first.
+func (h *Hub) RecordTurnSuccessWithConversation(clientID, convGen string, fingerprints, userFingerprints []string, uploadedSigs map[string]string, resetSession bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	sess := h.ensureSessionLocked(clientID)
@@ -311,9 +342,17 @@ func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string,
 	if convGen != "" && sess.convGen == "" {
 		sess.convGen = convGen
 	}
+	if resetSession {
+		sess.uploadedFiles = make(map[string]string)
+	}
 	cp := make([]string, len(fingerprints))
 	copy(cp, fingerprints)
 	sess.fingerprints = cp
+	if len(userFingerprints) > 0 {
+		ucp := make([]string, len(userFingerprints))
+		copy(ucp, userFingerprints)
+		sess.userFingerprints = ucp
+	}
 	for path, sig := range uploadedSigs {
 		if path != "" {
 			sess.uploadedFiles[path] = sig
@@ -555,6 +594,7 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 		Prompt:      opts.Prompt,
 		Model:       opts.Model,
 		Attachments: opts.Attachments,
+		NewChat:     opts.NewChat,
 		CreatedAt:   time.Now(),
 	}
 

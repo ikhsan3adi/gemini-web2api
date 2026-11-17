@@ -22,6 +22,7 @@
   "bridge_max_per_10min": 18,
   "bridge_auto_upload_local_files": true,
   "bridge_large_code_upload_bytes": 12288,
-  "bridge_spillover_chars": 18000,
-  "bridge_delta_context": true
+  "bridge_spillover_chars": 48000,
+  "bridge_delta_context": true,
+  "bridge_auto_new_chat": true
 }

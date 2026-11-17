@@ -30,6 +30,7 @@ type Config struct {
 	BridgeLargeCodeUploadBytes int      `json:"bridge_large_code_upload_bytes"`
 	BridgeSpilloverChars       int      `json:"bridge_spillover_chars"`
 	BridgeDeltaContext         bool     `json:"bridge_delta_context"`
+	BridgeAutoNewChat          bool     `json:"bridge_auto_new_chat"`
 }
 
 func Default() Config {
@@ -55,8 +56,9 @@ func Default() Config {
 		BridgeMaxPer10Min:          18,
 		BridgeAutoUploadLocalFiles: true,
 		BridgeLargeCodeUploadBytes: 12288,
-		BridgeSpilloverChars:       18000,
+		BridgeSpilloverChars:       48000,
 		BridgeDeltaContext:         true,
+		BridgeAutoNewChat:          true,
 	}
 }
 
@@ -98,6 +100,7 @@ func Load(path string) (Config, error) {
 		BridgeLargeCodeUploadBytes *int      `json:"bridge_large_code_upload_bytes"`
 		BridgeSpilloverChars       *int      `json:"bridge_spillover_chars"`
 		BridgeDeltaContext         *bool     `json:"bridge_delta_context"`
+		BridgeAutoNewChat          *bool     `json:"bridge_auto_new_chat"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -172,6 +175,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.BridgeDeltaContext != nil {
 		cfg.BridgeDeltaContext = *aux.BridgeDeltaContext
+	}
+	if aux.BridgeAutoNewChat != nil {
+		cfg.BridgeAutoNewChat = *aux.BridgeAutoNewChat
 	}
 
 	return cfg, nil
