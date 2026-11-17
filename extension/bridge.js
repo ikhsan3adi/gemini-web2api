@@ -2657,8 +2657,9 @@
         const timeSinceChange = now - lastChangeTime;
         const timeSinceStart = now - startTime;
 
-        // If network stream finished with no text (e.g. SKIPPED), allow DOM up to 6s to render fallback
-        if (netDoneAt && sentText.length === 0 && !generating && now - netDoneAt > 6000) {
+        // If network stream finished with no text (e.g. SKIPPED), allow DOM up to 12s to render fallback
+        if (netDoneAt && sentText.length === 0 && !generating && now - netDoneAt > 12000) {
+          console.warn("[Web2API Bridge] Network stream finished with no text and DOM fallback timed out after 12s.");
           finish();
           return;
         }

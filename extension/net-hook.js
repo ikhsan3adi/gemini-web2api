@@ -360,6 +360,13 @@
           feedJson(chunk);
         },
         finish() {
+          if (!state.hasText && typeof console !== "undefined" && console.warn) {
+            console.warn("[Web2API NetHook] Discovery stream finished with no extracted text:", url, {
+              failed: state.failed,
+              skipped: state.skipped,
+              skippedReasons: state.skippedReasons
+            });
+          }
           emit("done", {
             hasText: state.hasText,
             failed: state.failed,
@@ -460,12 +467,13 @@
       extra || {}
     );
     try {
-      (globalScope.top || globalScope).postMessage(payload, "*");
-    } catch (e) {
-      try {
-        globalScope.postMessage(payload, "*");
-      } catch (e2) {}
-    }
+      if (globalScope.top && globalScope.top !== globalScope) {
+        globalScope.top.postMessage(payload, "*");
+      }
+    } catch (e) {}
+    try {
+      globalScope.postMessage(payload, "*");
+    } catch (e2) {}
   }
 
   function startStream(kind, url) {
