@@ -2,13 +2,16 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/bridge"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
@@ -40,6 +43,21 @@ func indexToolCalls(toolCalls []models.OpenAIToolCall) []models.OpenAIToolCall {
 		indexed[i] = tc
 	}
 	return indexed
+}
+
+func writeBridgeRateLimitError(w http.ResponseWriter, retryAfter time.Duration, msg string) {
+	secs := int(retryAfter.Round(time.Second).Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    "rate_limit_error",
+			"code":    "rate_limit_exceeded",
+		},
+	})
 }
 
 func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -75,17 +93,6 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return
-	}
-
-	// Upload images to Gemini storage.
-	var fileRefs []string
-	if len(images) > 0 {
-		fileRefs, err = a.uploadImages(images)
-		if err != nil {
-			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-			return
-		}
 	}
 
 	gemOpt := gemini.ModelOptions{
@@ -188,7 +195,20 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Check if an authenticated browser tab is connected via the extension bridge.
 	if a.Bridge != nil && a.Bridge.IsConnected() {
+		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
+			rlErr := &bridge.RateLimitError{RetryAfter: rem}
+			a.Logf("Bridge rate-limit circuit breaker active: %v", rlErr)
+			writeBridgeRateLimitError(w, rem, rlErr.Error())
+			return
+		}
+
 		a.Logf("Routing chat completion through active browser bridge (%s)", a.Bridge.TabName())
+		prepared := a.prepareBridgeRequest(r, req, prompt, images)
+		bridgeOpts := bridge.GenerateOptions{
+			Prompt:      prepared.Prompt,
+			Model:       resolved.Name,
+			Attachments: prepared.Attachments,
+		}
 
 		if req.Stream {
 			if !startSSE(w) {
@@ -285,7 +305,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				return safeWriteSSE(chunk)
 			}
 
-			emitErr := a.Bridge.GenerateStream(r.Context(), prompt, resolved.Name, func(delta string) error {
+			emitErr := a.Bridge.GenerateStreamWithOptions(r.Context(), bridgeOpts, func(delta string) error {
 				fullText.WriteString(delta)
 
 				if !hasTools {
@@ -324,6 +344,9 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			<-doneKeepalive
 
 			if emitErr == nil {
+				if strings.TrimSpace(fullText.String()) != "" {
+					a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
+				}
 				if hasTools {
 					if isBufferingToolCall {
 						cleanText, toolCalls := format.ParseToolCalls(fullText.String())
@@ -448,10 +471,18 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		text, err := a.Bridge.Generate(r.Context(), prompt, resolved.Name)
+		text, err := a.Bridge.GenerateWithOptions(r.Context(), bridgeOpts)
 		if err != nil {
+			var rlErr *bridge.RateLimitError
+			if errors.As(err, &rlErr) {
+				writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
+				return
+			}
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
 			return
+		}
+		if strings.TrimSpace(text) != "" {
+			a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
 		}
 
 		var toolCalls []models.OpenAIToolCall
@@ -490,6 +521,17 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return
+	}
+
+	// Direct Gemini API mode: upload images to Gemini storage via cookies.
+	var fileRefs []string
+	if len(images) > 0 {
+		fileRefs, err = a.uploadImages(images)
+		if err != nil {
+			a.Logf("Image upload error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+			return
+		}
 	}
 
 	if req.Stream && (len(req.Tools) == 0 || isToolNone) {

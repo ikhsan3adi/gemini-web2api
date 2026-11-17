@@ -182,6 +182,93 @@ func ImageFromPart(mapItem map[string]any) (Image, bool) {
 	return Image{}, false
 }
 
+// FileFromPart parses OpenAI-style file/document content parts (`file`, `input_file`, `document`)
+// into an Image/Attachment struct so PDFs and other documents can be uploaded directly via the bridge.
+func FileFromPart(mapItem map[string]any) (Image, bool) {
+	iType, _ := mapItem["type"].(string)
+
+	switch iType {
+	case "file":
+		fileObj, ok := mapItem["file"].(map[string]any)
+		if !ok {
+			fileObj = mapItem
+		}
+		filename, _ := fileObj["filename"].(string)
+		mimeHint := partMime(fileObj)
+		if mimeHint == "" {
+			mimeHint = partMime(mapItem)
+		}
+		if fileData, ok := fileObj["file_data"].(string); ok && fileData != "" {
+			return decodeFilePayload(fileData, filename, mimeHint)
+		}
+		if fileURL, ok := fileObj["file_url"].(string); ok && fileURL != "" {
+			img, ok := imageFromURLString(fileURL, mimeHint)
+			if ok {
+				img.Filename = filename
+				return img, true
+			}
+		}
+	case "input_file":
+		filename, _ := mapItem["filename"].(string)
+		mimeHint := partMime(mapItem)
+		if fileData, ok := mapItem["file_data"].(string); ok && fileData != "" {
+			return decodeFilePayload(fileData, filename, mimeHint)
+		}
+		if fileURL, ok := mapItem["file_url"].(string); ok && fileURL != "" {
+			img, ok := imageFromURLString(fileURL, mimeHint)
+			if ok {
+				img.Filename = filename
+				return img, true
+			}
+		}
+	case "document":
+		filename, _ := mapItem["filename"].(string)
+		if filename == "" {
+			filename, _ = mapItem["title"].(string)
+		}
+		if source, ok := mapItem["source"].(map[string]any); ok {
+			mimeHint := partMime(source)
+			if dataStr, ok := source["data"].(string); ok && dataStr != "" {
+				return decodeFilePayload(dataStr, filename, mimeHint)
+			}
+			if urlStr, ok := source["url"].(string); ok && urlStr != "" {
+				img, ok := imageFromURLString(urlStr, mimeHint)
+				if ok {
+					img.Filename = filename
+					return img, true
+				}
+			}
+		}
+	}
+
+	return Image{}, false
+}
+
+func decodeFilePayload(payload, filename, mimeHint string) (Image, bool) {
+	if strings.HasPrefix(payload, "data:") {
+		data, decMime, err := DecodeDataURL(payload)
+		if err != nil {
+			return Image{}, false
+		}
+		if mimeHint == "" {
+			mimeHint = decMime
+		}
+		return Image{Data: data, MIME: mimeHint, Filename: filename}, true
+	}
+	decoded, err := multimodal.DecodeBase64Raw(payload)
+	if err != nil {
+		return Image{}, false
+	}
+	if mimeHint == "" {
+		if len(decoded) >= 4 && string(decoded[:4]) == "%PDF" {
+			mimeHint = "application/pdf"
+		} else {
+			mimeHint = "application/octet-stream"
+		}
+	}
+	return Image{Data: decoded, MIME: mimeHint, Filename: filename}, true
+}
+
 // BuildToolChoiceInstruction returns a prompt suffix based on the tool_choice parameter.
 func BuildToolChoiceInstruction(toolChoice any) string {
 	if strChoice, ok := toolChoice.(string); ok {
@@ -199,6 +286,75 @@ func BuildToolChoiceInstruction(toolChoice any) string {
 		}
 	}
 	return ""
+}
+
+// ExtractMessageContent extracts text and multimodal attachments (images + files) from one OpenAI message.
+func ExtractMessageContent(msg models.OpenAIMessage) (string, []Image) {
+	var attachments []Image
+
+	if strContent, ok := msg.Content.(string); ok {
+		return strContent, nil
+	}
+
+	contentList, ok := msg.Content.([]any)
+	if !ok {
+		return "", nil
+	}
+
+	var textParts []string
+	for _, item := range contentList {
+		if mapItem, ok := item.(map[string]any); ok {
+			iType, _ := mapItem["type"].(string)
+			if iType == "text" || iType == "input_text" || iType == "output_text" {
+				if t, ok := mapItem["text"].(string); ok {
+					textParts = append(textParts, t)
+				}
+			} else if img, ok := ImageFromPart(mapItem); ok {
+				attachments = append(attachments, img)
+				textParts = append(textParts, "[Image attached]")
+			} else if fileAtt, ok := FileFromPart(mapItem); ok {
+				attachments = append(attachments, fileAtt)
+				if fileAtt.Filename != "" {
+					textParts = append(textParts, fmt.Sprintf("[File attached: %s]", fileAtt.Filename))
+				} else {
+					textParts = append(textParts, "[File attached]")
+				}
+			}
+		} else if s, ok := item.(string); ok && s != "" {
+			textParts = append(textParts, s)
+		}
+	}
+
+	return strings.Join(textParts, " "), attachments
+}
+
+func formatMessagePart(msg models.OpenAIMessage, contentStr string) string {
+	role := msg.Role
+	if role == "" {
+		role = "user"
+	}
+
+	switch role {
+	case "system", "developer":
+		return fmt.Sprintf("[System instruction]: %s", contentStr)
+	case "assistant":
+		if len(msg.ToolCalls) > 0 {
+			var tcStrs []string
+			for _, tc := range msg.ToolCalls {
+				argsStr := tc.Function.Arguments
+				if argsStr == "" {
+					argsStr = "{}"
+				}
+				tcStrs = append(tcStrs, fmt.Sprintf("```tool_call\n{\"name\": \"%s\", \"arguments\": %s}\n```", tc.Function.Name, argsStr))
+			}
+			return fmt.Sprintf("[Assistant]: %s\n%s", contentStr, strings.Join(tcStrs, "\n"))
+		}
+		return fmt.Sprintf("[Assistant]: %s", contentStr)
+	case "tool":
+		return fmt.Sprintf("[Tool result for %s]: %s", msg.Name, contentStr)
+	default:
+		return contentStr
+	}
 }
 
 func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
@@ -245,7 +401,11 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 				"# Tool Use\n\n"+
 					"You can call the following tools. Call format:\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
-					"When calling tools, output ONLY the tool_call block(s).\n\n"+
+					"When calling tools:\n"+
+					"- Output ONLY the tool_call block(s).\n"+
+					"- Batch all independent reads, searches, or edits as multiple tool_call blocks in a SINGLE response to minimize round-trips.\n"+
+					"- For long code files: read directly attached files natively, or use search tools (grep) to jump to target lines instead of paginating chunk-by-chunk; prefer targeted edits over full-file rewrites, and avoid re-reading an entire file after an edit succeeds.\n"+
+					"- If a PDF, document, image, or source code file is already attached directly to this message, read the attached file directly instead of calling local tools to re-read or extract it.\n\n"+
 					"Available tools:\n%s%s",
 				string(defsJSON),
 				constraint,
@@ -254,61 +414,49 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 	}
 
 	for _, msg := range req.Messages {
-		role := msg.Role
-		if role == "" {
-			role = "user"
+		contentStr, msgAtts := ExtractMessageContent(msg)
+		if len(msgAtts) > 0 {
+			images = append(images, msgAtts...)
 		}
-
-		var contentStr string
-		if strContent, ok := msg.Content.(string); ok {
-			contentStr = strContent
-		} else if contentList, ok := msg.Content.([]any); ok {
-			var textParts []string
-			for _, item := range contentList {
-				if mapItem, ok := item.(map[string]any); ok {
-					iType, _ := mapItem["type"].(string)
-					if iType == "text" || iType == "input_text" || iType == "output_text" {
-						if t, ok := mapItem["text"].(string); ok {
-							textParts = append(textParts, t)
-						}
-					} else if img, ok := ImageFromPart(mapItem); ok {
-						images = append(images, img)
-						textParts = append(textParts, "[Image attached]")
-					}
-				} else if s, ok := item.(string); ok && s != "" {
-					textParts = append(textParts, s)
-				}
-			}
-			contentStr = strings.Join(textParts, " ")
-		}
-
-		switch role {
-		case "system", "developer":
-			parts = append(parts, fmt.Sprintf("[System instruction]: %s", contentStr))
-		case "assistant":
-			if len(msg.ToolCalls) > 0 {
-				var tcStrs []string
-				for _, tc := range msg.ToolCalls {
-					argsStr := tc.Function.Arguments
-					if argsStr == "" {
-						argsStr = "{}"
-					}
-					tcStrs = append(tcStrs, fmt.Sprintf("```tool_call\n{\"name\": \"%s\", \"arguments\": %s}\n```", tc.Function.Name, argsStr))
-				}
-				parts = append(parts, fmt.Sprintf("[Assistant]: %s\n%s", contentStr, strings.Join(tcStrs, "\n")))
-			} else {
-				parts = append(parts, fmt.Sprintf("[Assistant]: %s", contentStr))
-			}
-		case "tool":
-			parts = append(parts, fmt.Sprintf("[Tool result for %s]: %s", msg.Name, contentStr))
-		default:
-			if contentStr != "" {
-				parts = append(parts, contentStr)
-			}
+		if formatted := formatMessagePart(msg, contentStr); formatted != "" {
+			parts = append(parts, formatted)
 		}
 	}
 
 	return strings.Join(parts, "\n\n"), images, nil
+}
+
+// MessagesToDeltaPrompt formats only newly appended messages for an ongoing browser-bridge
+// conversation where the open Gemini tab already holds the earlier turns and tool definitions.
+func MessagesToDeltaPrompt(deltaMessages []models.OpenAIMessage, toolChoice any) (string, []Image) {
+	if len(deltaMessages) == 0 {
+		return "", nil
+	}
+
+	// If the first delta message is the assistant turn Gemini itself just generated,
+	// skip it when followed by new tool/user messages so we do not echo Gemini's own reply back.
+	startIdx := 0
+	if deltaMessages[0].Role == "assistant" && len(deltaMessages) > 1 {
+		startIdx = 1
+	}
+
+	var parts []string
+	var attachments []Image
+	for _, msg := range deltaMessages[startIdx:] {
+		contentStr, msgAtts := ExtractMessageContent(msg)
+		if len(msgAtts) > 0 {
+			attachments = append(attachments, msgAtts...)
+		}
+		if formatted := formatMessagePart(msg, contentStr); formatted != "" {
+			parts = append(parts, formatted)
+		}
+	}
+
+	prompt := strings.Join(parts, "\n\n")
+	if constraint := strings.TrimSpace(BuildToolChoiceInstruction(toolChoice)); constraint != "" && prompt != "" {
+		prompt += "\n\n" + constraint
+	}
+	return prompt, attachments
 }
 
 var reToolCall = regexp.MustCompile(`(?s)\x60\x60\x60tool_call\s*\n(.*?)\n\x60\x60\x60`)

@@ -16,5 +16,12 @@
   "log_requests": true,
   "impersonate": "",
   "temporary_chats": false,
-  "base_url": "https://gemini.google.com"
+  "base_url": "https://gemini.google.com",
+  "bridge_min_interval_ms": 2500,
+  "bridge_jitter_ms": 1500,
+  "bridge_max_per_10min": 18,
+  "bridge_auto_upload_local_files": true,
+  "bridge_large_code_upload_bytes": 12288,
+  "bridge_spillover_chars": 18000,
+  "bridge_delta_context": true
 }

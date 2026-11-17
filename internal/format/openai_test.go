@@ -335,3 +335,128 @@ func TestResponsesInputToMessagesMultiPartText(t *testing.T) {
 		t.Errorf("Got content %q, want %q", userContent, expected)
 	}
 }
+
+func TestFileFromPartOpenAIAndDocument(t *testing.T) {
+	pdfB64 := "JVBERi0xLjQK" // "%PDF-1.4\n"
+
+	req := models.OpenAIChatRequest{
+		Messages: []models.OpenAIMessage{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Summarize these PDFs"},
+					map[string]any{
+						"type": "file",
+						"file": map[string]any{
+							"filename":  "quarterly_report.pdf",
+							"file_data": "data:application/pdf;base64," + pdfB64,
+						},
+					},
+					map[string]any{
+						"type":      "input_file",
+						"filename":  "notes.pdf",
+						"file_data": pdfB64,
+					},
+					map[string]any{
+						"type":     "document",
+						"filename": "memo.pdf",
+						"source": map[string]any{
+							"type":       "base64",
+							"media_type": "application/pdf",
+							"data":       pdfB64,
+						},
+					},
+				},
+			},
+		},
+		ToolChoice: "auto",
+	}
+
+	prompt, atts, err := MessagesToPrompt(req)
+	if err != nil {
+		t.Fatalf("MessagesToPrompt error: %v", err)
+	}
+	if len(atts) != 3 {
+		t.Fatalf("expected 3 file attachments, got %d", len(atts))
+	}
+	for i, wantName := range []string{"quarterly_report.pdf", "notes.pdf", "memo.pdf"} {
+		if atts[i].Filename != wantName {
+			t.Errorf("att[%d].Filename = %q, want %q", i, atts[i].Filename, wantName)
+		}
+		if atts[i].MIME != "application/pdf" {
+			t.Errorf("att[%d].MIME = %q, want application/pdf", i, atts[i].MIME)
+		}
+		if string(atts[i].Data) != "%PDF-1.4\n" {
+			t.Errorf("att[%d].Data = %q, want %%PDF-1.4\\n", i, string(atts[i].Data))
+		}
+	}
+	if !strings.Contains(prompt, "[File attached: quarterly_report.pdf]") {
+		t.Errorf("prompt missing file marker, got %q", prompt)
+	}
+}
+
+func TestResponsesInputPreservesInputFile(t *testing.T) {
+	input := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "Read this PDF"},
+				map[string]any{
+					"type":      "input_file",
+					"filename":  "brief.pdf",
+					"file_data": "data:application/pdf;base64,JVBERi0xLjQK",
+				},
+			},
+		},
+	}
+
+	messages, err := ResponsesInputToMessages(input, "")
+	if err != nil {
+		t.Fatalf("ResponsesInputToMessages error: %v", err)
+	}
+	content, ok := messages[0]["content"].([]any)
+	if !ok {
+		t.Fatalf("expected structured []any content for input_file, got %T", messages[0]["content"])
+	}
+	_, atts, err := MessagesToPrompt(models.OpenAIChatRequest{
+		Messages:   []models.OpenAIMessage{{Role: "user", Content: content}},
+		ToolChoice: "auto",
+	})
+	if err != nil {
+		t.Fatalf("MessagesToPrompt error: %v", err)
+	}
+	if len(atts) != 1 || atts[0].Filename != "brief.pdf" {
+		t.Fatalf("expected brief.pdf attachment, got %+v", atts)
+	}
+}
+
+func TestMessagesToDeltaPromptSkipsPriorAssistant(t *testing.T) {
+	delta := []models.OpenAIMessage{
+		{
+			Role: "assistant",
+			ToolCalls: []models.OpenAIToolCall{
+				{
+					ID:   "call_1",
+					Type: "function",
+					Function: models.OpenAIToolCallFunction{
+						Name:      "read_file",
+						Arguments: `{"path":"a.txt"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:    "tool",
+			Name:    "read_file",
+			Content: "file contents here",
+		},
+	}
+
+	prompt, _ := MessagesToDeltaPrompt(delta, "auto")
+	if strings.Contains(prompt, "[Assistant]:") {
+		t.Errorf("delta prompt should skip leading assistant echo, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "[Tool result for read_file]: file contents here") {
+		t.Errorf("delta prompt missing tool result, got %q", prompt)
+	}
+}

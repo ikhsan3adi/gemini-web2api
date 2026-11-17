@@ -39,6 +39,7 @@ func main() {
 	proxyFlag := flag.String("proxy", "", "HTTP proxy URL")
 	impersonateFlag := flag.String("impersonate", "", "TLS impersonation profile")
 	baseURLFlag := flag.String("base-url", "", "Upstream Gemini base URL (e.g. https://gemini.google.com or https://vertexaisearch.cloud.google.com)")
+	bridgeCooldownFlag := flag.Int("bridge-cooldown", -1, "Minimum milliseconds between consecutive bridge requests (-1 uses config default)")
 	versionFlag := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
@@ -74,6 +75,9 @@ func main() {
 	}
 	if *baseURLFlag != "" {
 		cfg.BaseURL = *baseURLFlag
+	}
+	if *bridgeCooldownFlag >= 0 {
+		cfg.BridgeMinIntervalMs = *bridgeCooldownFlag
 	}
 
 	app := server.New(cfg, currentVersion)

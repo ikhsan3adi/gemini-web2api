@@ -36,6 +36,26 @@
     return null;
   }
 
+  function classifyUploadEndpoint(url, method) {
+    if (!url) return false;
+    const m = method ? String(method).toUpperCase() : "POST";
+    if (m !== "POST" && m !== "PUT") return false;
+    const u = String(url);
+
+    if (
+      /widgetAddContextFile/i.test(u) ||
+      /[:/]addContextFile(\b|\?|$)/i.test(u) ||
+      /[:/]uploadContextFile(\b|\?|$)/i.test(u) ||
+      /[:/]uploadFile(\b|\?|$)/i.test(u) ||
+      /content-push\.clients6\.google\.com\/upload/i.test(u) ||
+      /push\.clients6\.google\.com\/upload/i.test(u) ||
+      (/googleapis\.com/i.test(u) && /\/upload\//i.test(u))
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   // Incremental balanced-brace top-level JSON object extractor.
   // Handles streaming JSON arrays ([{...},{...}]), anti-XSSI prefixes (")]}'"),
   // NDJSON ({...}\n{...}), and SSE (data: {...}\n\n) without splitting on braces inside strings.
@@ -359,6 +379,7 @@
     module.exports = {
       MSG_KEY,
       classifyEndpoint,
+      classifyUploadEndpoint,
       createJsonObjectExtractor,
       extractBardTextsFromLine,
       cleanBardText,
@@ -424,7 +445,23 @@
       } catch (e) {}
 
       const kind = classifyEndpoint(url, method);
+      const isUpload = !kind && classifyUploadEndpoint(url, method);
       const promise = origFetch.apply(this, args);
+
+      if (isUpload) {
+        const uploadId = `upl_${Date.now()}_${++streamCounter}`;
+        postToBridge("upload_start", uploadId, url, {});
+        promise.then((res) => {
+          if (res && res.ok) {
+            postToBridge("upload_done", uploadId, url, { status: res.status });
+          } else {
+            postToBridge("upload_error", uploadId, url, { status: res ? res.status : 0 });
+          }
+        }).catch((err) => {
+          postToBridge("upload_error", uploadId, url, { error: String((err && err.message) || err) });
+        });
+        return promise;
+      }
 
       if (!kind) {
         return promise;
@@ -434,7 +471,12 @@
 
       promise.then((res) => {
         if (!res || !res.ok) {
-          postToBridge("error", streamId, url, { error: `HTTP ${res ? res.status : "error"}` });
+          const status = res ? res.status : 0;
+          postToBridge("error", streamId, url, {
+            error: `HTTP ${status || "error"}`,
+            status,
+            rateLimited: status === 429
+          });
           return;
         }
         let cloned;
@@ -501,7 +543,23 @@
     XHRProto.send = function web2apiXhrSend(body) {
       try {
         const kind = classifyEndpoint(this.__w2aUrl, this.__w2aMethod);
-        if (kind) {
+        const isUpload = !kind && classifyUploadEndpoint(this.__w2aUrl, this.__w2aMethod);
+        if (isUpload) {
+          const uploadId = `upl_${Date.now()}_${++streamCounter}`;
+          const url = this.__w2aUrl;
+          postToBridge("upload_start", uploadId, url, {});
+          let doneSent = false;
+          const finishUpload = (ok, extra) => {
+            if (doneSent) return;
+            doneSent = true;
+            postToBridge(ok ? "upload_done" : "upload_error", uploadId, url, extra || {});
+          };
+          this.addEventListener("load", () => {
+            finishUpload(this.status >= 200 && this.status < 300, { status: this.status });
+          });
+          this.addEventListener("error", () => finishUpload(false, { error: "XHR upload error" }));
+          this.addEventListener("abort", () => finishUpload(false, { error: "XHR upload aborted" }));
+        } else if (kind) {
           const url = this.__w2aUrl;
           const streamObj = startStream(kind, url);
           let offset = 0;
@@ -534,7 +592,11 @@
                 }
                 streamObj.processor.finish();
               } else {
-                postToBridge("error", streamObj.streamId, url, { error: `HTTP ${this.status}` });
+                postToBridge("error", streamObj.streamId, url, {
+                  error: `HTTP ${this.status}`,
+                  status: this.status,
+                  rateLimited: this.status === 429
+                });
               }
             } catch (e) {}
           });
@@ -551,6 +613,77 @@
         }
       } catch (e) {}
       return origSend.call(this, body);
+    };
+  }
+
+  // 3. Armed one-shot file-input click trap for detached <input type="file"> upload buttons.
+  // Only intercepts while explicitly armed by bridge.js (auto-expires in 8s); manual user clicks pass through untouched.
+  let armedUpload = null;
+
+  function buildDataTransferFromPayloads(files) {
+    const dt = new DataTransfer();
+    for (const f of files || []) {
+      if (!f || !f.data_base64) continue;
+      const binStr = atob(f.data_base64);
+      const bytes = new Uint8Array(binStr.length);
+      for (let i = 0; i < binStr.length; i++) {
+        bytes[i] = binStr.charCodeAt(i);
+      }
+      const fileObj = new File([bytes], f.filename || "attachment.bin", {
+        type: f.mime || "application/octet-stream",
+        lastModified: Date.now()
+      });
+      dt.items.add(fileObj);
+    }
+    return dt;
+  }
+
+  globalScope.addEventListener("message", (event) => {
+    const data = event && event.data;
+    if (!data || typeof data !== "object") return;
+    if (data.__web2api_upload_arm === true && Array.isArray(data.files) && data.files.length > 0) {
+      armedUpload = {
+        armId: String(data.armId || ""),
+        files: data.files,
+        expiresAt: Date.now() + 8000
+      };
+    } else if (data.__web2api_upload_disarm === true) {
+      if (!data.armId || (armedUpload && armedUpload.armId === String(data.armId))) {
+        armedUpload = null;
+      }
+    }
+  });
+
+  const InputProto = globalScope.HTMLInputElement && globalScope.HTMLInputElement.prototype;
+  if (InputProto && typeof InputProto.click === "function") {
+    const origInputClick = InputProto.click;
+    InputProto.click = function web2apiInputClick() {
+      try {
+        if (
+          this &&
+          String(this.type || "").toLowerCase() === "file" &&
+          armedUpload &&
+          Date.now() < armedUpload.expiresAt
+        ) {
+          const activeArm = armedUpload;
+          armedUpload = null; // One-shot disarm
+
+          const dt = buildDataTransferFromPayloads(activeArm.files);
+          if (dt.files.length > 0) {
+            this.files = dt.files;
+            this.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+            this.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+            postToBridge("upload_injected", activeArm.armId, "", {
+              count: dt.files.length,
+              method: "click_trap"
+            });
+            return;
+          }
+        }
+      } catch (e) {
+        armedUpload = null;
+      }
+      return origInputClick.apply(this, arguments);
     };
   }
 })(typeof window !== "undefined" ? window : globalThis);

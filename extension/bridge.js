@@ -567,6 +567,413 @@
     return "";
   }
 
+  // ---------------------------------------------------------------------------
+  // Attachment & File Upload Helpers (pure / testable)
+  // ---------------------------------------------------------------------------
+
+  function base64ToUint8Array(b64) {
+    if (!b64) return new Uint8Array(0);
+    if (typeof atob === "function") {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) {
+        out[i] = bin.charCodeAt(i);
+      }
+      return out;
+    }
+    if (typeof Buffer !== "undefined") {
+      return new Uint8Array(Buffer.from(b64, "base64"));
+    }
+    return new Uint8Array(0);
+  }
+
+  function buildAttachedFileNote(attachments) {
+    if (!Array.isArray(attachments) || attachments.length === 0) return "";
+    const names = attachments
+      .map((a) => (a && a.filename ? String(a.filename).trim() : ""))
+      .filter(Boolean);
+    if (names.length === 0) return "";
+    return `[Directly attached file(s): ${names.join(", ")}. Read the attached file(s) natively in full — do NOT call local shell/python/file tools to inspect or extract them.]`;
+  }
+
+  function hasAttachmentChipInDom(filenames, inputArea, root) {
+    if (!Array.isArray(filenames) || filenames.length === 0) return false;
+    const lowered = filenames
+      .map((f) => String(f || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (lowered.length === 0) return false;
+
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return false;
+
+    // Look for attachment chip / file card elements outside our badge and outside the text input
+    const candidates = queryDeep(
+      "[class*='file'], [class*='attach'], [class*='chip'], [class*='upload'], [data-test-id*='file'], [data-test-id*='attach'], [role='listitem'], [aria-label]",
+      searchRoot
+    );
+    for (const el of candidates) {
+      if (isOwnExtensionElement(el)) continue;
+      if (inputArea && (el === inputArea || containsDeep(inputArea, el))) continue;
+      const aria = String((el.getAttribute && el.getAttribute("aria-label")) || "").toLowerCase();
+      const title = String((el.getAttribute && el.getAttribute("title")) || "").toLowerCase();
+      const text = String(extractControlLabel(el) || "").trim().toLowerCase();
+      if (text.length > 400) continue;
+      for (const name of lowered) {
+        if ((aria && aria.includes(name)) || (title && title.includes(name)) || (text && text.includes(name))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function extractControlLabel(node) {
+    if (!node) return "";
+    if (node.nodeType === 3) return node.textContent || "";
+    if (node.nodeType !== 1 && node.nodeType !== 11) return "";
+    if (node.nodeType === 1) {
+      if (isOwnExtensionElement(node)) return "";
+      const tag = (node.tagName || "").toUpperCase();
+      if (tag === "SCRIPT" || tag === "STYLE" || tag === "SVG" || tag === "NOSCRIPT") return "";
+      if (tag === "SLOT" && typeof node.assignedNodes === "function") {
+        const assigned = node.assignedNodes({ flatten: true });
+        if (assigned && assigned.length > 0) {
+          return assigned.map(extractControlLabel).join(" ");
+        }
+      }
+      if (node.shadowRoot) {
+        const srText = extractControlLabel(node.shadowRoot);
+        if (srText.trim()) return srText;
+      }
+    }
+    let out = "";
+    const children = node.childNodes || [];
+    for (let i = 0; i < children.length; i++) {
+      const part = extractControlLabel(children[i]);
+      if (part) out += (out ? " " : "") + part;
+    }
+    return out;
+  }
+
+  function isLinkOrPromoElement(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = String(el.tagName || "").toUpperCase();
+    if (tag === "A") return true;
+    const role = String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
+    if (role === "link") return true;
+    if (el.getAttribute && (el.getAttribute("href") || el.getAttribute("target") === "_blank")) {
+      return true;
+    }
+    if (
+      closestDeep(
+        el,
+        'a, [href], [target="_blank"], [role="link"], [class*="banner"], [class*="promo"], [class*="announcement"], [class*="whats-new"], [class*="snackbar"], [class*="toast"], [role="alert"], [role="status"], header'
+      )
+    ) {
+      return true;
+    }
+    // Reject wrapper containers around an external/navigation <a> link
+    try {
+      const childLinks = queryDeep('a[href], a[target="_blank"], [role="link"]', el);
+      if (childLinks.length > 0) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function isRateLimitMessage(msg) {
+    if (!msg) return false;
+    const lower = String(msg).toLowerCase();
+    return (
+      lower.includes("http 429") ||
+      lower.includes("too many requests") ||
+      lower.includes("rate limit") ||
+      lower.includes("rate_limit") ||
+      lower.includes("quota exceeded") ||
+      lower.includes("resource_exhausted") ||
+      lower.includes("unusual traffic") ||
+      lower.includes("try again later")
+    );
+  }
+
+  function isElementVisible(el) {
+    if (!el || isElementHidden(el)) return false;
+    if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+      try {
+        const s = window.getComputedStyle(el);
+        if (s && (s.display === "none" || s.visibility === "hidden" || parseFloat(s.opacity) === 0)) {
+          return false;
+        }
+      } catch (e) {}
+    }
+    if (typeof el.getBoundingClientRect === "function") {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return false;
+    }
+    return true;
+  }
+
+  const ALL_MODEL_FAMILIES = ["hydrogen", "carbon", "argon", "flash", "pro", "auto"];
+  const PROMO_LINK_TEXT_RE = /\b(introducing|learn more|read more|blog|what'?s new|announcement|explore now|discover)\b/i;
+
+  function findModelOption(target, triggerEl, root) {
+    if (!target) return null;
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    const competing = ALL_MODEL_FAMILIES.filter((f) => f !== target.family);
+    const all = queryDeep("*", searchRoot);
+    const matches = [];
+
+    for (const el of all) {
+      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el) || isLinkOrPromoElement(el)) continue;
+      if (triggerEl && (el === triggerEl || containsDeep(triggerEl, el) || containsDeep(el, triggerEl))) {
+        continue;
+      }
+      if (!isElementVisible(el)) continue;
+
+      const t = String(extractControlLabel(el) || el.innerText || el.textContent || "").trim();
+      if (!t || t.length > 140) continue;
+      const lower = t.toLowerCase();
+
+      if (PROMO_LINK_TEXT_RE.test(lower)) continue;
+      if (!target.keywords.some((kw) => lower.includes(kw))) continue;
+
+      // Reject menu containers that list multiple competing models together
+      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(lower))) {
+        continue;
+      }
+
+      const clickable = closestDeep(
+        el,
+        'button, [role="menuitem"], [role="menuitemradio"], [role="option"], [role="button"], li, mat-option, md-menu-item, mwc-list-item, [class*="option"], [class*="menu-item"]'
+      );
+      if (!clickable) continue;
+      if (isOwnExtensionElement(clickable) || isLinkOrPromoElement(clickable) || !isElementVisible(clickable)) {
+        continue;
+      }
+      if (triggerEl && (clickable === triggerEl || containsDeep(triggerEl, clickable) || containsDeep(clickable, triggerEl))) {
+        continue;
+      }
+
+      const cText = String(extractControlLabel(clickable) || clickable.innerText || clickable.textContent || "").trim();
+      if (!cText || cText.length > 160 || PROMO_LINK_TEXT_RE.test(cText)) continue;
+      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(cText.toLowerCase()))) {
+        continue;
+      }
+
+      const cRole = String((clickable.getAttribute && clickable.getAttribute("role")) || "").toLowerCase();
+      const cTag = String(clickable.tagName || "").toLowerCase();
+      const hasMenuOptionRole =
+        cRole === "menuitem" ||
+        cRole === "menuitemradio" ||
+        cRole === "option" ||
+        cTag === "mat-option" ||
+        cTag === "md-menu-item" ||
+        cTag === "mwc-list-item";
+
+      const inMenuOverlay = !!closestDeep(
+        clickable,
+        '[role="menu"], [role="listbox"], .cdk-overlay-pane, [class*="menu"], [class*="dropdown"], [class*="popup"], [class*="popover"], [class*="overlay"]'
+      );
+
+      // Strictly require an actual menu overlay or explicit menu-option role so
+      // non-dropdown page banners or announcements can NEVER be clicked!
+      if (!inMenuOverlay && !hasMenuOptionRole) continue;
+
+      matches.push({ el: clickable, inMenuOverlay, hasMenuOptionRole, len: cText.length });
+    }
+
+    if (matches.length === 0) return null;
+
+    matches.sort((a, b) => {
+      if (a.inMenuOverlay !== b.inMenuOverlay) return a.inMenuOverlay ? -1 : 1;
+      if (a.hasMenuOptionRole !== b.hasMenuOptionRole) return a.hasMenuOptionRole ? -1 : 1;
+      return a.len - b.len;
+    });
+
+    return matches[0].el;
+  }
+
+  function findModelTriggerElement(root) {
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    // Strategy 1: Look near the mic icon (In Vertex AI Search, model selector is right next to mic)
+    const micIcons = queryDeep('mat-icon, [data-mat-icon-name="mic"], button[aria-label*="mic" i], [data-icon*="mic"]', searchRoot);
+    for (const mic of micIcons) {
+      if (isOwnExtensionElement(mic) || isNavigationOrSidebar(mic) || isLinkOrPromoElement(mic)) continue;
+      const t = String(extractControlLabel(mic) || mic.innerText || mic.textContent || "").trim().toLowerCase();
+      const n = String((mic.getAttribute && mic.getAttribute("data-mat-icon-name")) || "").toLowerCase();
+      if (t === "mic" || n === "mic") {
+        const container = closestDeep(mic, ".bottom-bar, form, discovery-engine-chat, div") || mic.parentElement;
+        if (container) {
+          const candidates = queryDeep('button, [role="button"], [role="combobox"], [aria-haspopup], mat-select', container);
+          for (const b of candidates) {
+            if (isOwnExtensionElement(b) || isLinkOrPromoElement(b) || containsDeep(b, mic) || containsDeep(mic, b)) continue;
+            const txt = String(extractControlLabel(b) || b.innerText || b.textContent || "").trim().toLowerCase();
+            if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)(\s|$)/i.test(txt) && isElementVisible(b)) {
+              return b;
+            }
+          }
+        }
+      }
+    }
+
+    // Strategy 2: Explicit menu trigger / combobox / button matching model name
+    const candidates = queryDeep(
+      'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select, .mat-mdc-menu-trigger, [class*="model-selector"], [class*="model-picker"]',
+      searchRoot
+    );
+    for (const el of candidates) {
+      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el) || isLinkOrPromoElement(el) || !isElementVisible(el)) continue;
+      const t = String(extractControlLabel(el) || el.innerText || el.textContent || "").trim();
+      if (/^(auto|hydrogen|gemini(?:\s*\d+(?:\.\d+)?)?(?:\s*(?:hydrogen|carbon|argon|flash|pro))?|carbon|argon|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
+        return el;
+      }
+    }
+
+    // Strategy 3: Dropdown arrow icon near model trigger text
+    const arrowIcons = queryDeep("mat-icon, md-icon, svg, [data-icon]", searchRoot);
+    for (const icon of arrowIcons) {
+      if (isOwnExtensionElement(icon) || isNavigationOrSidebar(icon) || isLinkOrPromoElement(icon)) continue;
+      const iconTxt = String(extractControlLabel(icon) || icon.innerText || icon.textContent || "").trim().toLowerCase();
+      const iconName = String((icon.getAttribute && icon.getAttribute("data-mat-icon-name")) || "").toLowerCase();
+      if (
+        iconTxt === "keyboard_arrow_down" || iconTxt === "expand_more" || iconTxt === "arrow_drop_down" ||
+        iconName.includes("arrow_down") || iconName.includes("expand_more")
+      ) {
+        const btn = closestDeep(icon, 'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select') || icon.parentElement;
+        if (btn && !isOwnExtensionElement(btn) && !isLinkOrPromoElement(btn) && isElementVisible(btn) && !isNavigationOrSidebar(btn)) {
+          const btnTxt = String(extractControlLabel(btn) || btn.innerText || btn.textContent || "").trim().toLowerCase();
+          if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)/i.test(btnTxt)) {
+            return btn;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function findAttachButton(inputArea, root) {
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    const buttons = queryDeep('button, [role="button"], md-icon-button, mwc-icon-button', searchRoot);
+    const inputRect =
+      inputArea && typeof inputArea.getBoundingClientRect === "function"
+        ? inputArea.getBoundingClientRect()
+        : null;
+
+    let bestBtn = null;
+    let bestScore = -1;
+
+    for (const btn of buttons) {
+      if (isOwnExtensionElement(btn) || isLinkOrPromoElement(btn)) continue;
+      if (btn.disabled || (btn.getAttribute && btn.getAttribute("aria-disabled") === "true")) continue;
+      const rect = typeof btn.getBoundingClientRect === "function" ? btn.getBoundingClientRect() : { width: 24, height: 24, top: 0, left: 0 };
+      if (rect.width === 0 && rect.height === 0) continue;
+
+      const aria = String((btn.getAttribute && btn.getAttribute("aria-label")) || "").toLowerCase();
+      const title = String((btn.getAttribute && btn.getAttribute("title")) || "").toLowerCase();
+      const testId = String((btn.getAttribute && btn.getAttribute("data-test-id")) || "").toLowerCase();
+      const text = String(extractControlLabel(btn) || "").trim().toLowerCase();
+      const combined = `${aria} ${title} ${testId} ${text}`;
+
+      // Exclude send, mic, stop, new chat, menu, or model dropdown buttons
+      if (
+        /\b(send|submit|stop|microphone|voice|audio|new chat|close|delete|remove|sign out|account|settings)\b/.test(combined)
+      ) {
+        continue;
+      }
+
+      let score = 0;
+      if (/\b(upload|attach|add file|add files|upload file|upload files|add context|add image|paperclip|attach_file|upload_file)\b/.test(combined)) {
+        score += 100;
+      } else if (/\b(add|more)\b/.test(combined) && (text === "+" || text === "add" || aria.includes("add"))) {
+        score += 70;
+      } else if (text === "+" || text === "add" || text === "attach_file" || text === "upload_file") {
+        score += 60;
+      }
+
+      if (score <= 0) continue;
+
+      // Prefer buttons visually close to the chat input bar
+      if (inputRect && inputRect.height > 0 && rect.top > 0) {
+        const dy = Math.abs(rect.top - inputRect.top);
+        if (dy < 160) score += 50;
+        else if (dy > 350) score -= 40;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestBtn = btn;
+      }
+    }
+
+    return bestBtn;
+  }
+
+  function findUploadMenuOption(root, excludeEl) {
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    const items = queryDeep(
+      '[role="menuitem"], [role="option"], [role="button"], button, li, md-menu-item, mat-list-item, [class*="menu-item"]',
+      searchRoot
+    );
+
+    let bestItem = null;
+    let bestScore = -1;
+
+    for (const el of items) {
+      if (isOwnExtensionElement(el) || isLinkOrPromoElement(el)) continue;
+      if (excludeEl && (el === excludeEl || containsDeep(excludeEl, el))) continue;
+      if (typeof el.getBoundingClientRect === "function") {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) continue;
+      }
+      const role = String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
+      const tag = String(el.tagName || "").toLowerCase();
+      const aria = String((el.getAttribute && el.getAttribute("aria-label")) || "").toLowerCase();
+      const text = String(extractControlLabel(el) || "").trim().toLowerCase();
+      if (!text && !aria) continue;
+      if (text.length > 120) continue;
+      const combined = `${aria} ${text}`;
+
+      // Avoid Google Drive / Cloud / URL pickers when we want local file upload
+      if (/\b(google drive|from drive|drive|cloud storage|url|link|camera|photo library)\b/.test(combined)) {
+        continue;
+      }
+
+      let score = 0;
+      if (/\b(upload files?|upload from (?:computer|device)|from (?:computer|device)|local files?)\b/.test(combined)) {
+        score = 120;
+      } else if (/\badd files?\b/.test(combined)) {
+        score = 80;
+      } else if (/\bupload\b/.test(combined)) {
+        score = 70;
+      } else if (/\b(attach|choose file|browse)\b/.test(combined)) {
+        score = 50;
+      }
+
+      if (score <= 0) continue;
+
+      if (role === "menuitem" || role === "option" || tag === "li" || tag.includes("menu-item") || tag.includes("list-item")) {
+        score += 40;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestItem = el;
+      }
+    }
+
+    return bestItem;
+  }
+
   // Export pure/DOM helpers for Node.js unit testing
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
@@ -586,7 +993,16 @@
       isResponseElement,
       findResponseElements,
       snapshotResponses,
-      extractActiveDomResponseText
+      extractActiveDomResponseText,
+      base64ToUint8Array,
+      buildAttachedFileNote,
+      hasAttachmentChipInDom,
+      isLinkOrPromoElement,
+      isRateLimitMessage,
+      findModelOption,
+      findModelTriggerElement,
+      findAttachButton,
+      findUploadMenuOption
     };
     return;
   }
@@ -604,15 +1020,80 @@
   let autoRefreshEnabled = false;
   let currentActiveStream = null;
   let activeNetCapture = null;
+  let convGen = 1;
+  let lastConvUrlKey = `${location.pathname}${location.search}`;
+  let hadResponsesInConv = false;
 
-  // Listen for transparent network stream events from net-hook.js (MAIN world)
+  const uploadTracker = {
+    inFlightIds: new Set(),
+    startedCount: 0,
+    doneCount: 0,
+    errorCount: 0,
+    injectedArmIds: new Set()
+  };
+
+  function syncConversationGeneration() {
+    const curUrlKey = `${location.pathname}${location.search}`;
+    if (curUrlKey !== lastConvUrlKey) {
+      lastConvUrlKey = curUrlKey;
+      // Only treat URL navigation as a fresh conversation if we already saw replies
+      // in the previous conversation (avoids spurious bump when Google assigns a /cid/
+      // on the very first turn of a brand-new chat).
+      if (hadResponsesInConv) {
+        convGen++;
+        hadResponsesInConv = false;
+        console.log("[Web2API Bridge] Conversation URL changed after prior replies -> conv_gen:", convGen);
+      }
+      return;
+    }
+
+    // Detect SPA "New Chat" reset where all prior response elements disappeared
+    if (hadResponsesInConv && !activeReqId) {
+      try {
+        const curResponses = findResponseElements(lastFocusedInput, "");
+        if (curResponses.length === 0) {
+          convGen++;
+          hadResponsesInConv = false;
+          console.log("[Web2API Bridge] Detected New Chat reset -> conv_gen:", convGen);
+        }
+      } catch (e) {}
+    }
+  }
+
+  // Listen for transparent network stream & upload events from net-hook.js (MAIN world)
   window.addEventListener("message", (event) => {
     const data = event && event.data;
     if (!data || data[NET_MSG_KEY] !== true) return;
-    const cap = activeNetCapture;
-    if (!cap) return;
 
     const { type, streamId, url } = data;
+
+    // Upload telemetry & click-trap confirmation (active before prompt submission)
+    if (type === "upload_start") {
+      if (streamId) uploadTracker.inFlightIds.add(streamId);
+      uploadTracker.startedCount++;
+      console.log("[Web2API Bridge] File upload started:", url);
+      return;
+    }
+    if (type === "upload_done") {
+      if (streamId) uploadTracker.inFlightIds.delete(streamId);
+      uploadTracker.doneCount++;
+      console.log("[Web2API Bridge] File upload completed:", url);
+      return;
+    }
+    if (type === "upload_error") {
+      if (streamId) uploadTracker.inFlightIds.delete(streamId);
+      uploadTracker.errorCount++;
+      console.warn("[Web2API Bridge] File upload error:", data.error || data.status, url);
+      return;
+    }
+    if (type === "upload_injected") {
+      if (streamId) uploadTracker.injectedArmIds.add(streamId);
+      console.log("[Web2API Bridge] File input injected via", data.method, "count:", data.count);
+      return;
+    }
+
+    const cap = activeNetCapture;
+    if (!cap) return;
 
     if (type === "start") {
       if (!cap.activeStreamId || (!cap.receivedText && !cap.active)) {
@@ -663,6 +1144,7 @@
       cap.active = false;
       cap.thinking = false;
       cap.error = data.error || "stream error";
+      cap.rateLimited = Boolean(data.rateLimited || isRateLimitMessage(data.error));
       cap.notify();
     }
   });
@@ -956,141 +1438,28 @@
     }
   }
 
-  const ALL_MODEL_FAMILIES = ["hydrogen", "carbon", "argon", "flash", "pro", "auto"];
-
-  function findModelOption(target, triggerEl) {
-    if (!target) return null;
-    const competing = ALL_MODEL_FAMILIES.filter((f) => f !== target.family);
-    const all = queryDeep("*");
-    const matches = [];
-
-    for (const el of all) {
-      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el)) continue;
-      if (triggerEl && (el === triggerEl || containsDeep(triggerEl, el) || containsDeep(el, triggerEl))) {
-        continue;
-      }
-      if (!isVisible(el)) continue;
-
-      const t = (el.innerText || el.textContent || "").trim();
-      if (!t || t.length > 140) continue;
-      const lower = t.toLowerCase();
-
-      if (!target.keywords.some((kw) => lower.includes(kw))) continue;
-
-      // Reject menu containers that list multiple competing models together
-      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(lower))) {
-        continue;
-      }
-
-      const clickable =
-        closestDeep(el, 'button, [role="menuitem"], [role="option"], [role="button"], li, mat-option, md-menu-item, [class*="option"], [class*="item"]') || el;
-
-      if (isOwnExtensionElement(clickable) || !isVisible(clickable)) continue;
-      if (triggerEl && (clickable === triggerEl || containsDeep(triggerEl, clickable) || containsDeep(clickable, triggerEl))) {
-        continue;
-      }
-
-      // Check clickable text too (don't climb into a multi-option menu container)
-      const cText = (clickable.innerText || clickable.textContent || "").trim();
-      if (cText.length > 160 || competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(cText.toLowerCase()))) {
-        continue;
-      }
-
-      const inMenuOverlay = !!closestDeep(
-        clickable,
-        '[role="menu"], [role="listbox"], .cdk-overlay-pane, [class*="menu"], [class*="dropdown"], [class*="popup"], [class*="popover"], [class*="overlay"]'
-      );
-
-      matches.push({ el: clickable, inMenuOverlay, len: cText.length });
-    }
-
-    if (matches.length === 0) return null;
-
-    // Prefer options inside an actual dropdown/menu overlay, then shortest/most specific option
-    matches.sort((a, b) => {
-      if (a.inMenuOverlay !== b.inMenuOverlay) return a.inMenuOverlay ? -1 : 1;
-      return a.len - b.len;
-    });
-
-    return matches[0].el;
-  }
-
-  function findModelTriggerElement() {
-    // Strategy 1: Look near the mic icon (In Vertex AI Search, model selector is right next to mic)
-    const micIcons = queryDeep('mat-icon, [data-mat-icon-name="mic"], button[aria-label*="mic" i], [data-icon*="mic"]');
-    for (const mic of micIcons) {
-      if (isOwnExtensionElement(mic) || isNavigationOrSidebar(mic)) continue;
-      const t = (mic.innerText || mic.textContent || "").trim().toLowerCase();
-      const n = (mic.getAttribute("data-mat-icon-name") || "").toLowerCase();
-      if (t === "mic" || n === "mic") {
-        const container = closestDeep(mic, ".bottom-bar, form, discovery-engine-chat, div") || mic.parentElement;
-        if (container) {
-          const candidates = queryDeep('button, [role="button"], [role="combobox"], [aria-haspopup], mat-select', container);
-          for (const b of candidates) {
-            if (isOwnExtensionElement(b) || containsDeep(b, mic) || containsDeep(mic, b)) continue;
-            const txt = (b.innerText || b.textContent || "").trim().toLowerCase();
-            if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)(\s|$)/i.test(txt) && isVisible(b)) {
-              return b;
-            }
-          }
-        }
-      }
-    }
-
-    // Strategy 2: Explicit menu trigger / combobox / button matching model name
-    const candidates = queryDeep(
-      'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select, .mat-mdc-menu-trigger, [class*="model-selector"], [class*="model-picker"]'
-    );
-    for (const el of candidates) {
-      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el) || !isVisible(el)) continue;
-      const t = (el.innerText || el.textContent || "").trim();
-      if (/^(auto|hydrogen|gemini(?:\s*\d+(?:\.\d+)?)?(?:\s*(?:hydrogen|carbon|argon|flash|pro))?|carbon|argon|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
-        return el;
-      }
-    }
-
-    // Strategy 3: Dropdown arrow icon near model trigger text
-    const arrowIcons = queryDeep("mat-icon, md-icon, svg, [data-icon]");
-    for (const icon of arrowIcons) {
-      if (isOwnExtensionElement(icon) || isNavigationOrSidebar(icon)) continue;
-      const iconTxt = (icon.innerText || icon.textContent || "").trim().toLowerCase();
-      const iconName = (icon.getAttribute("data-mat-icon-name") || "").toLowerCase();
-      if (
-        iconTxt === "keyboard_arrow_down" || iconTxt === "expand_more" || iconTxt === "arrow_drop_down" ||
-        iconName.includes("arrow_down") || iconName.includes("expand_more")
-      ) {
-        const btn = closestDeep(icon, 'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select') || icon.parentElement;
-        if (btn && !isOwnExtensionElement(btn) && isVisible(btn) && !isNavigationOrSidebar(btn)) {
-          const btnTxt = (btn.innerText || btn.textContent || "").trim().toLowerCase();
-          if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)/i.test(btnTxt)) {
-            return btn;
-          }
-        }
-      }
-    }
-
-    return null;
-  }
-
   async function ensureModelSelected(requestedModel) {
     const target = resolveModelKeywords(requestedModel);
     if (!target) return false;
 
     const trigger = findModelTriggerElement();
-    if (trigger) {
-      const currentText = (trigger.innerText || trigger.textContent || "").trim().toLowerCase();
-      if (target.keywords.some((kw) => currentText.includes(kw))) {
-        console.log("[Web2API Bridge] Target model already selected:", currentText);
-        if (target.family === "hydrogen") {
-          modelBtn.textContent = "✅ Hydrogen";
-        }
-        return true;
-      }
+    if (!trigger) {
+      // Never blindly click elements on the page when no model dropdown trigger exists
+      return false;
     }
 
-    // 1. If a dropdown menu is already open with the option visible, click it directly
+    const currentText = String(extractControlLabel(trigger) || trigger.innerText || trigger.textContent || "").trim().toLowerCase();
+    if (target.keywords.some((kw) => currentText.includes(kw))) {
+      console.log("[Web2API Bridge] Target model already selected:", currentText);
+      if (target.family === "hydrogen") {
+        modelBtn.textContent = "✅ Hydrogen";
+      }
+      return true;
+    }
+
+    // 1. If a dropdown menu overlay is already open with the option visible, click it
     let item = findModelOption(target, trigger);
-    if (item && isVisible(item)) {
+    if (item && isVisible(item) && !isLinkOrPromoElement(item)) {
       console.log("[Web2API Bridge] Dropdown already open, clicking model option:", item);
       simulateClick(item);
       await new Promise((r) => setTimeout(r, 250));
@@ -1098,24 +1467,22 @@
       return true;
     }
 
-    // 2. Open dropdown via trigger button (click ONLY trigger, never parentElement)
-    if (trigger) {
-      console.log("[Web2API Bridge] Opening model dropdown via trigger:", trigger);
-      simulateClick(trigger);
-      await new Promise((r) => setTimeout(r, 250));
+    // 2. Open dropdown via verified model trigger button (never an <a> link or banner)
+    console.log("[Web2API Bridge] Opening model dropdown via trigger:", trigger);
+    simulateClick(trigger);
+    await new Promise((r) => setTimeout(r, 250));
 
-      const start = Date.now();
-      while (Date.now() - start < 2500) {
-        item = findModelOption(target, trigger);
-        if (item && isVisible(item)) {
-          console.log("[Web2API Bridge] Found model menu option, clicking:", item);
-          simulateClick(item);
-          await new Promise((r) => setTimeout(r, 250));
-          if (target.family === "hydrogen") modelBtn.textContent = "✅ Hydrogen";
-          return true;
-        }
-        await new Promise((r) => setTimeout(r, 100));
+    const start = Date.now();
+    while (Date.now() - start < 2500) {
+      item = findModelOption(target, trigger);
+      if (item && isVisible(item) && !isLinkOrPromoElement(item)) {
+        console.log("[Web2API Bridge] Found model menu option, clicking:", item);
+        simulateClick(item);
+        await new Promise((r) => setTimeout(r, 250));
+        if (target.family === "hydrogen") modelBtn.textContent = "✅ Hydrogen";
+        return true;
       }
+      await new Promise((r) => setTimeout(r, 100));
     }
 
     console.warn("[Web2API Bridge] Target model not found in dropdown:", target.label);
@@ -1400,6 +1767,227 @@
   }
 
   // ---------------------------------------------------------------------------
+  // 2b. Direct Multi-Tier File Upload (PDFs, Office Docs, Images)
+  // ---------------------------------------------------------------------------
+
+  function buildDataTransferFromAttachments(attachments) {
+    const dt = new DataTransfer();
+    for (const att of attachments || []) {
+      if (!att || !att.data_base64) continue;
+      const bytes = base64ToUint8Array(att.data_base64);
+      if (bytes.length === 0) continue;
+      const file = new File([bytes], att.filename || "attachment.bin", {
+        type: att.mime || "application/octet-stream",
+        lastModified: Date.now()
+      });
+      dt.items.add(file);
+    }
+    return dt;
+  }
+
+  function findBestFileInput(inputArea) {
+    const inputs = queryDeep('input[type="file"]').filter((el) => !isOwnExtensionElement(el));
+    if (inputs.length === 0) return null;
+
+    let best = inputs[0];
+    let bestScore = -1;
+    const composerForm = inputArea ? closestDeep(inputArea, "form") : null;
+
+    for (const inp of inputs) {
+      let score = 10;
+      if (composerForm && containsDeep(composerForm, inp)) score += 60;
+      if (inp.multiple) score += 20;
+      const accept = String(inp.getAttribute("accept") || "").toLowerCase();
+      if (!accept || accept.includes("pdf") || accept.includes("*")) score += 15;
+      if (score > bestScore) {
+        bestScore = score;
+        best = inp;
+      }
+    }
+    return best;
+  }
+
+  async function waitForUploadTrigger(filenames, inputArea, snap, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (uploadTracker.startedCount > snap.startedCount) {
+        return "network";
+      }
+      if (snap.armId && uploadTracker.injectedArmIds.has(snap.armId)) {
+        return "injected";
+      }
+      if (hasAttachmentChipInDom(filenames, inputArea)) {
+        return "chip";
+      }
+      await new Promise((r) => setTimeout(r, 90));
+    }
+    return null;
+  }
+
+  async function waitForUploadsReady(filenames, inputArea, snap) {
+    // Allow brief window after injection for upload POST request to kick off
+    const kickDeadline = Date.now() + 1800;
+    while (
+      Date.now() < kickDeadline &&
+      uploadTracker.startedCount === snap.startedCount &&
+      !hasAttachmentChipInDom(filenames, inputArea)
+    ) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // If network upload started, wait until all in-flight uploads finish (up to 35s for large PDFs)
+    if (uploadTracker.startedCount > snap.startedCount) {
+      const netDeadline = Date.now() + 35000;
+      while (Date.now() < netDeadline) {
+        const finished = uploadTracker.doneCount > snap.doneCount || uploadTracker.errorCount > snap.errorCount;
+        if (uploadTracker.inFlightIds.size === 0 && finished) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      if (uploadTracker.errorCount > snap.errorCount && uploadTracker.doneCount === snap.doneCount) {
+        return false;
+      }
+    }
+
+    // Wait briefly for UI chip / send button to settle
+    const chipDeadline = Date.now() + 3000;
+    while (Date.now() < chipDeadline && !hasAttachmentChipInDom(filenames, inputArea)) {
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    await new Promise((r) => setTimeout(r, 450));
+    return true;
+  }
+
+  async function uploadAttachmentsToPage(attachments, inputArea) {
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+      return { ok: false, method: "none" };
+    }
+
+    const filenames = attachments.map((a) => (a && a.filename) || "attachment");
+    const dt = buildDataTransferFromAttachments(attachments);
+    if (dt.files.length === 0) {
+      return { ok: false, method: "empty" };
+    }
+
+    const snap = {
+      startedCount: uploadTracker.startedCount,
+      doneCount: uploadTracker.doneCount,
+      errorCount: uploadTracker.errorCount,
+      armId: null
+    };
+
+    // Tier 1: Direct assignment to an existing <input type="file"> in DOM / Shadow DOM
+    const existingInput = findBestFileInput(inputArea);
+    if (existingInput) {
+      try {
+        existingInput.files = dt.files;
+        existingInput.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+        existingInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+        const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 700);
+        if (triggered) {
+          const ready = await waitForUploadsReady(filenames, inputArea, snap);
+          if (ready) {
+            console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 1 (<input type=file>)");
+            return { ok: true, method: "file_input" };
+          }
+        }
+      } catch (e) {
+        console.warn("[Web2API Bridge] Tier 1 file input error:", e);
+      }
+    }
+
+    // Tier 2: Synthetic Drag-and-Drop onto chat input / composer container
+    try {
+      const dropTargets = [inputArea];
+      const container = closestDeep(
+        inputArea,
+        "form, [class*='composer'], [class*='input-area'], [class*='chat-input'], [class*='prompt'], main"
+      );
+      if (container && container !== inputArea) {
+        dropTargets.push(container);
+      }
+
+      for (const target of dropTargets) {
+        if (!target) continue;
+        const freshDt = buildDataTransferFromAttachments(attachments);
+        for (const evName of ["dragenter", "dragover", "drop"]) {
+          let ev;
+          try {
+            ev = new DragEvent(evName, {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              dataTransfer: freshDt
+            });
+          } catch (err) {
+            ev = new Event(evName, { bubbles: true, cancelable: true, composed: true });
+            Object.defineProperty(ev, "dataTransfer", { value: freshDt });
+          }
+          target.dispatchEvent(ev);
+        }
+
+        const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 750);
+        if (triggered) {
+          const ready = await waitForUploadsReady(filenames, inputArea, snap);
+          if (ready) {
+            console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 2 (drag-and-drop)");
+            return { ok: true, method: "drag_drop" };
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[Web2API Bridge] Tier 2 drag-drop error:", e);
+    }
+
+    // Tier 3: Armed MAIN-world click trap + clicking the page's '+' / Attach / Upload button
+    const attachBtn = findAttachButton(inputArea);
+    if (attachBtn) {
+      const armId = `arm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      snap.armId = armId;
+      try {
+        window.postMessage(
+          {
+            __web2api_upload_arm: true,
+            armId,
+            files: attachments
+          },
+          "*"
+        );
+        await new Promise((r) => setTimeout(r, 60));
+
+        simulateClick(attachBtn);
+        let triggered = await waitForUploadTrigger(filenames, inputArea, snap, 550);
+
+        if (!triggered) {
+          // Clicking '+' likely opened a popover menu ("Upload files" / "Upload from computer")
+          const menuOpt = findUploadMenuOption(document, attachBtn);
+          if (menuOpt) {
+            simulateClick(menuOpt);
+            triggered = await waitForUploadTrigger(filenames, inputArea, snap, 750);
+          }
+        }
+
+        if (triggered) {
+          const ready = await waitForUploadsReady(filenames, inputArea, snap);
+          if (ready) {
+            console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 3 (attach button + click trap)");
+            return { ok: true, method: "click_trap" };
+          }
+        }
+      } catch (e) {
+        console.warn("[Web2API Bridge] Tier 3 click-trap upload error:", e);
+      } finally {
+        window.postMessage({ __web2api_upload_disarm: true, armId }, "*");
+        closeAnyOpenDropdown();
+      }
+    }
+
+    console.warn("[Web2API Bridge] All file upload tiers did not confirm upload for:", filenames.join(", "));
+    return { ok: false, method: "failed" };
+  }
+
+  // ---------------------------------------------------------------------------
   // 3. Prompt Handling & Dual-Engine Stream Observation
   // ---------------------------------------------------------------------------
 
@@ -1415,6 +2003,7 @@
       accumulated: "",
       done: false,
       error: null,
+      rateLimited: false,
       skipped: false,
       skippedReasons: [],
       onUpdate(fn) {
@@ -1428,7 +2017,7 @@
     };
   }
 
-  async function handlePromptRequest(reqId, prompt, model) {
+  async function handlePromptRequest(reqId, prompt, model, attachments) {
     // A. Switch model dropdown if the requested model specifies a known family
     try {
       await ensureModelSelected(model);
@@ -1439,6 +2028,27 @@
     // B. Locate Prompt Input Area
     const inputArea = await findChatInput(3500);
 
+    // B2. Directly upload any attached PDFs/documents/images to the Gemini page
+    let effectivePrompt = prompt;
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      const label = attachments.map((a) => (a && a.filename) || "file").join(", ");
+      setStatus("busy", `Web2API: Uploading ${label}... 📎`);
+      try {
+        const uploadRes = await uploadAttachmentsToPage(attachments, inputArea);
+        if (uploadRes && uploadRes.ok) {
+          const note = buildAttachedFileNote(attachments);
+          if (note) {
+            effectivePrompt = `${note}\n\n${prompt}`;
+          }
+          setStatus("busy", `Web2API: Attached ${label} ✓`);
+        } else {
+          console.warn("[Web2API Bridge] Proceeding with text-only prompt after upload fallback.");
+        }
+      } catch (e) {
+        console.warn("[Web2API Bridge] Attachment upload threw error:", e);
+      }
+    }
+
     // Snapshot exact pre-existing response elements BEFORE submitting
     const baselineMap = snapshotResponses(inputArea);
 
@@ -1447,14 +2057,17 @@
     activeNetCapture = netCapture;
 
     try {
-      setInputValue(inputArea, prompt);
-      await new Promise((r) => setTimeout(r, 200));
+      setInputValue(inputArea, effectivePrompt);
+      // Small humanized jitter before clicking Send to avoid robotic fixed timing
+      await new Promise((r) => setTimeout(r, 220 + Math.floor(Math.random() * 280)));
 
       const submitSuccess = await submitPrompt(inputArea, netCapture);
       console.log("[Web2API Bridge] submitPrompt result:", submitSuccess, "netStarted:", netCapture.started);
 
       // C. Watch for Streaming Response (Network primary, DOM fallback)
-      await observeResponseStream(reqId, inputArea, prompt, baselineMap, netCapture);
+      await observeResponseStream(reqId, inputArea, effectivePrompt, baselineMap, netCapture);
+      lastConvUrlKey = `${location.pathname}${location.search}`;
+      hadResponsesInConv = true;
     } finally {
       if (activeNetCapture === netCapture) {
         activeNetCapture = null;
@@ -1463,6 +2076,8 @@
 
     // D. Auto-Refresh page after response is delivered (if enabled)
     if (autoRefreshEnabled) {
+      convGen++;
+      hadResponsesInConv = false;
       setStatus("busy", "Web2API: Refreshing page for next request...");
       await new Promise((r) => setTimeout(r, 600));
       resetOrRefreshPage();
@@ -1480,10 +2095,10 @@
       const startTime = Date.now();
       let chunkQueue = Promise.resolve();
 
-      function enqueueChunk(text, isDone, err) {
+      function enqueueChunk(text, isDone, err, rateLimited) {
         chunkQueue = chunkQueue.then(async () => {
           if (abortedByServer) return;
-          const res = await sendChunk(reqId, text, isDone, err);
+          const res = await sendChunk(reqId, text, isDone, err, rateLimited);
           if (res && res.gone) {
             console.log("[Web2API Bridge] Request cancelled by client (410 Gone), stopping observer.");
             abortedByServer = true;
@@ -1518,7 +2133,7 @@
         currentActiveStream = null;
       }
 
-      function finish(explicitError) {
+      function finish(explicitError, explicitRateLimited) {
         if (completed) return;
         cleanup();
 
@@ -1535,20 +2150,30 @@
         }
 
         if (!sentText.trim()) {
-          const errMsg = explicitError || "Model did not respond. Please verify the prompt was sent on the page or refresh.";
-          console.warn("[Web2API Bridge] Completing with error:", errMsg);
-          enqueueChunk("", true, errMsg).then(() => resolve()).catch(() => resolve());
+          const errMsg = explicitError || netCapture.error || "Model did not respond. Please verify the prompt was sent on the page or refresh.";
+          const rateLimited = Boolean(explicitRateLimited || netCapture.rateLimited || isRateLimitMessage(errMsg));
+          if (rateLimited) {
+            setStatus("disconnected", "Web2API: Rate limit detected — cooling down 🛡️");
+          }
+          console.warn("[Web2API Bridge] Completing with error:", errMsg, "rateLimited:", rateLimited);
+          enqueueChunk("", true, errMsg, rateLimited).then(() => resolve()).catch(() => resolve());
           return;
         }
 
         console.log(
           `[Web2API Bridge] Response completed (${sentText.length} chars, mode=${netCapture.receivedText ? "network" : "dom"})`
         );
-        enqueueChunk("", true).then(() => resolve()).catch(() => resolve());
+        enqueueChunk("", true, "", false).then(() => resolve()).catch(() => resolve());
       }
 
       function tick() {
         if (completed || abortedByServer) return;
+
+        // Immediately trip circuit breaker if Google returned HTTP 429 / rate limit
+        if (netCapture.rateLimited && !netCapture.receivedText) {
+          finish(netCapture.error || "HTTP 429 rate limited", true);
+          return;
+        }
 
         // 1. PRIMARY ENGINE: Transparent Network Stream Interception
         if (netCapture.receivedText) {
@@ -1667,6 +2292,7 @@
         body: JSON.stringify({
           tab: location.hostname,
           client_id: CLIENT_ID,
+          conv_gen: String(convGen),
           busy: true
         })
       });
@@ -1681,12 +2307,17 @@
 
     while (true) {
       try {
+        syncConversationGeneration();
         const tabParam = encodeURIComponent(location.hostname);
         const clientParam = encodeURIComponent(CLIENT_ID);
-        const res = await fetch(`${BRIDGE_URL}/bridge/poll?tab=${tabParam}&client=${clientParam}`, {
-          method: "GET",
-          headers: { Accept: "application/json" }
-        });
+        const convParam = encodeURIComponent(String(convGen));
+        const res = await fetch(
+          `${BRIDGE_URL}/bridge/poll?tab=${tabParam}&client=${clientParam}&conv_gen=${convParam}`,
+          {
+            method: "GET",
+            headers: { Accept: "application/json" }
+          }
+        );
 
         if (!res.ok) {
           setStatus("disconnected");
@@ -1705,7 +2336,7 @@
           activeReqId = data.id;
           setStatus("busy", "Web2API: Answering request...");
           try {
-            await handlePromptRequest(data.id, data.prompt, data.model);
+            await handlePromptRequest(data.id, data.prompt, data.model, data.attachments);
           } catch (err) {
             console.error("[Web2API Bridge] Error processing prompt:", err);
             await sendChunk(data.id, "", true, (err && err.message) || "Failed to generate reply");
@@ -1721,17 +2352,21 @@
     }
   }
 
-  async function sendChunk(id, chunkText, isDone, err) {
+  async function sendChunk(id, chunkText, isDone, err, rateLimited) {
     try {
+      const payload = {
+        id: id,
+        text: chunkText,
+        done: isDone,
+        error: err || ""
+      };
+      if (rateLimited) {
+        payload.rate_limited = true;
+      }
       const res = await fetch(`${BRIDGE_URL}/bridge/chunk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: id,
-          text: chunkText,
-          done: isDone,
-          error: err || ""
-        })
+        body: JSON.stringify(payload)
       });
       if (res.status === 410) {
         return { gone: true };
@@ -1743,15 +2378,7 @@
     }
   }
 
-  // On Vertex AI Search / Gemini Enterprise, auto-select Hydrogen on startup
-  if (
-    location.hostname.includes("vertexaisearch.cloud.google.com") ||
-    location.hostname.includes("business.gemini.google")
-  ) {
-    setTimeout(() => {
-      ensureModelSelected("hydrogen").catch(() => {});
-    }, 1500);
-  }
-
+  // Note: Model switching happens on-demand right before submitting a request (or via the
+  // badge button), never via unsolicited page-load clicks that could trigger banners/links.
   pollServer();
 })(typeof window !== "undefined" ? window : globalThis);

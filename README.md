@@ -296,6 +296,29 @@ To completely eliminate the risk of Google account or cookie bans, you do not ne
 4. A floating status badge will appear on your Gemini web page: `🟢 Web2API Bridge: Connected (:8081)`.
 5. Any request sent to `http://localhost:8081/v1/chat/completions` (from WorkBuddy, Cursor, or curl) is automatically routed through your live browser tab, streaming tokens straight from Google's web UI.
 
+#### Direct PDF / Long-Code File Upload & Anti-Ban Protections (Bridge Mode)
+
+When running with the Live Web Bridge, `gemini-web2api` includes built-in protections against repetitive agent tool loops and Google frequency bans:
+
+- **Direct File, PDF & Long-Code Upload**: OpenAI `file` / `input_file` / `document` / `image_url` parts are uploaded straight into your open Gemini tab (no cookies required). For direct `localhost` agent requests (such as WorkBuddy), referenced local PDFs, Office documents, images, and **long source code files (`>= bridge_large_code_upload_bytes`, default 12 KB)** are automatically attached verbatim (up to 25 MB, max 5 files/turn) and automatically refreshed only when edited on disk.
+- **Oversized Prompt / Tool-Result Spillover (`bridge_spillover_chars: 18000`)**: Prompts or huge `read_file` tool outputs exceeding 18 KB are automatically uploaded as a `.txt` attachment instead of being slammed into the web input box, preventing UI truncation and repetitive re-reads.
+- **Delta-Turn Context (`bridge_delta_context: true`)**: Follow-up turns in the same open Gemini tab send only the newly appended user/tool messages rather than re-pasting the full conversation history and tool schemas every turn (auto-resets on refresh or New Chat).
+- **Adaptive Anti-Ban Pacing & 429 Circuit Breaker**: Combines base cooldown (`bridge_min_interval_ms: 2500`), random human-like jitter (`bridge_jitter_ms: 1500`), progressive burst scaling during heavy coding loops, a rolling 10-minute window cap (`bridge_max_per_10min: 18`), and an automatic exponential cool-off circuit breaker (returning HTTP `429` + `Retry-After`) if Google signals rate limiting.
+
+All options can be tuned in `config.json`:
+
+```json
+{
+  "bridge_min_interval_ms": 2500,
+  "bridge_jitter_ms": 1500,
+  "bridge_max_per_10min": 18,
+  "bridge_auto_upload_local_files": true,
+  "bridge_large_code_upload_bytes": 12288,
+  "bridge_spillover_chars": 18000,
+  "bridge_delta_context": true
+}
+```
+
 ### Gemini Enterprise (Vertex AI Search) Support
 
 If your organization uses **Gemini Enterprise** hosted at `https://vertexaisearch.cloud.google.com/`, configure `base_url`:

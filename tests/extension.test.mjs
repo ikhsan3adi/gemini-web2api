@@ -611,3 +611,166 @@ test("Shadow DOM + <slot> Vertex AI Search simulation NEVER returns 'Gemini 4 Hy
     "Here is the second answer."
   );
 });
+
+// ---------------------------------------------------------------------------
+// 6. Direct File Upload telemetry & DOM selectors tests
+// ---------------------------------------------------------------------------
+
+test("classifyUploadEndpoint matches Gemini Enterprise & Consumer file upload APIs", () => {
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetAddContextFile",
+      "POST"
+    ),
+    true
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://discoveryengine.googleapis.com/v1alpha/projects/123/locations/global/collections/default_collection/engines/eng/assistants/default_assistant:addContextFile",
+      "POST"
+    ),
+    true
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-push.clients6.google.com/upload/",
+      "POST"
+    ),
+    true
+  );
+  // GET requests and regular stream endpoints must NOT be classified as uploads
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetAddContextFile",
+      "GET"
+    ),
+    false
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
+      "POST"
+    ),
+    false
+  );
+});
+
+test("buildAttachedFileNote and base64ToUint8Array handle PDF attachments", () => {
+  const bytes = bridge.base64ToUint8Array("JVBERi0xLjQK");
+  assert.equal(Buffer.from(bytes).toString("utf8"), "%PDF-1.4\n");
+
+  const note = bridge.buildAttachedFileNote([
+    { filename: "report.pdf" },
+    { filename: "slides.pptx" }
+  ]);
+  assert.ok(note.includes("report.pdf, slides.pptx"));
+  assert.ok(note.includes("do NOT call local shell/python/file tools"));
+  assert.equal(bridge.buildAttachedFileNote([]), "");
+});
+
+test("Shadow DOM upload helpers locate attach button, menu option, and attachment chip", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  const chatHost = el("ucs-chat-app");
+  const shadow = chatHost.attachShadow();
+  doc.body.appendChild(chatHost);
+
+  const textarea = el("textarea");
+  const sendBtn = el("button", { "aria-label": "Send message" });
+  sendBtn.appendChild(txt("Send"));
+  const attachBtn = el("button", { "aria-label": "Add files" });
+  attachBtn.appendChild(txt("+"));
+
+  shadow.appendChild(textarea);
+  shadow.appendChild(attachBtn);
+  shadow.appendChild(sendBtn);
+
+  // Must pick the attach/add-files button, never Send
+  const foundAttach = bridge.findAttachButton(textarea, doc);
+  assert.equal(foundAttach, attachBtn);
+
+  // Upload popover menu with both Google Drive and Upload files
+  const driveItem = el("div", { role: "menuitem" });
+  driveItem.appendChild(txt("Add from Google Drive"));
+  const uploadItem = el("div", { role: "menuitem" });
+  uploadItem.appendChild(txt("Upload files"));
+  shadow.appendChild(driveItem);
+  shadow.appendChild(uploadItem);
+
+  const foundMenu = bridge.findUploadMenuOption(doc);
+  assert.equal(foundMenu, uploadItem);
+
+  // Before upload, no attachment chip exists
+  assert.equal(bridge.hasAttachmentChipInDom(["quarterly_report.pdf"], textarea, doc), false);
+
+  // After upload, chip renders filename in DOM
+  const chip = el("div", { class: "file-attachment-chip" });
+  chip.appendChild(txt("quarterly_report.pdf"));
+  shadow.appendChild(chip);
+
+  assert.equal(bridge.hasAttachmentChipInDom(["quarterly_report.pdf"], textarea, doc), true);
+});
+
+// ---------------------------------------------------------------------------
+// 7. Regression tests: never click blog.google announcement links + rate-limit detection
+// ---------------------------------------------------------------------------
+
+test("findModelOption and findModelTriggerElement NEVER click blog.google announcement links or promo banners", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  const target = bridge.resolveModelKeywords("gemini-4-hydrogen");
+
+  // 1. Exact announcement link on Gemini Enterprise that used to pop open a new tab
+  const promoBanner = el("div", { class: "announcement-banner" });
+  const blogLink = el("a", {
+    href: "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+    target: "_blank"
+  });
+  const blogSpan = el("span");
+  blogSpan.appendChild(txt("Gemini 4 Hydrogen"));
+  blogLink.appendChild(blogSpan);
+  promoBanner.appendChild(blogLink);
+  doc.body.appendChild(promoBanner);
+
+  // 2. Standalone external link without banner wrapper
+  const bareLink = el("a", {
+    href: "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+    target: "_blank",
+    role: "button"
+  });
+  bareLink.appendChild(txt("Gemini 4 Hydrogen"));
+  doc.body.appendChild(bareLink);
+
+  // 3. Non-menu page card containing "Introducing Gemini 4 Hydrogen"
+  const promoCard = el("button");
+  promoCard.appendChild(txt("Introducing Gemini 4 Hydrogen - Learn more"));
+  doc.body.appendChild(promoCard);
+
+  assert.equal(bridge.isLinkOrPromoElement(blogLink), true);
+  assert.equal(bridge.isLinkOrPromoElement(blogSpan), true);
+  assert.equal(bridge.isLinkOrPromoElement(bareLink), true);
+
+  // With NO open dropdown menu, neither trigger nor option may match any of the above!
+  assert.equal(bridge.findModelTriggerElement(doc), null);
+  assert.equal(bridge.findModelOption(target, null, doc), null);
+
+  // 4. Once a genuine dropdown overlay menu opens with a real menuitem, select ONLY that menuitem
+  const overlay = el("div", { class: "cdk-overlay-pane", role: "menu" });
+  const realOption = el("button", { role: "menuitem" });
+  realOption.appendChild(txt("Gemini 4 Hydrogen"));
+  overlay.appendChild(realOption);
+  doc.body.appendChild(overlay);
+
+  assert.equal(bridge.findModelOption(target, null, doc), realOption);
+});
+
+test("isRateLimitMessage detects Google 429 / quota / traffic warnings", () => {
+  assert.equal(bridge.isRateLimitMessage("HTTP 429"), true);
+  assert.equal(bridge.isRateLimitMessage("Too many requests, please try again later"), true);
+  assert.equal(bridge.isRateLimitMessage("RESOURCE_EXHAUSTED: quota exceeded"), true);
+  assert.equal(bridge.isRateLimitMessage("Unusual traffic detected"), true);
+  assert.equal(bridge.isRateLimitMessage("HTTP 500 internal error"), false);
+  assert.equal(bridge.isRateLimitMessage(""), false);
+});
+
+

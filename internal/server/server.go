@@ -47,12 +47,18 @@ func New(cfg config.Config, version string) *App {
 	}
 
 	httpClient := createHTTPClient(cfg)
+	hub := bridge.NewHub()
+	hub.SetPacing(
+		time.Duration(cfg.BridgeMinIntervalMs)*time.Millisecond,
+		time.Duration(cfg.BridgeJitterMs)*time.Millisecond,
+		cfg.BridgeMaxPer10Min,
+	)
 
 	app := &App{
 		Cfg:        cfg,
 		Gem:        gemClient,
 		Tokens:     multimodal.NewTokenCache(cfg, gemClient.Cookies, httpClient),
-		Bridge:     bridge.NewHub(),
+		Bridge:     hub,
 		HTTPClient: httpClient,
 		Logf:       logFn,
 		Version:    version,

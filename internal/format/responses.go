@@ -112,17 +112,21 @@ func ResponsesInputToMessages(input any, instructions string) ([]map[string]any,
 					if cList, ok := rawContent.([]any); ok {
 						// Normalize text-only lists to a joined string for
 						// cleaner prompts, but keep the list when it contains
-						// image parts.
-						hasImage := false
+						// image or file/document attachment parts.
+						hasAttachment := false
 						for _, c := range cList {
 							if cMap, ok := c.(map[string]any); ok {
 								if _, ok := ImageFromPart(cMap); ok {
-									hasImage = true
+									hasAttachment = true
+									break
+								}
+								if _, ok := FileFromPart(cMap); ok {
+									hasAttachment = true
 									break
 								}
 							}
 						}
-						if !hasImage {
+						if !hasAttachment {
 							var parts []string
 							for _, c := range cList {
 								if cMap, ok := c.(map[string]any); ok {

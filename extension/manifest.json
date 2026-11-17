@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Web2API - Live Web Bridge & Exporter",
-  "version": "1.2.0",
+  "version": "1.3.1",
   "description": "Zero-ban live web bridge and cookie exporter for gemini-web2api. Interacts directly with your open Gemini Web or Gemini Enterprise tab in real time.",
   "permissions": [
     "cookies",

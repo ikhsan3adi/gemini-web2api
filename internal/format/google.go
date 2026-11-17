@@ -11,9 +11,10 @@ import (
 )
 
 type Image struct {
-	Data []byte
-	MIME string
-	URL  string // Remote URL passthrough (when data not yet fetched)
+	Data     []byte
+	MIME     string
+	URL      string // Remote URL passthrough (when data not yet fetched)
+	Filename string // Optional filename for attached PDFs, documents, or images
 }
 
 func BuildToolPrompt(defs []models.GoogleFunctionDeclaration) string {
