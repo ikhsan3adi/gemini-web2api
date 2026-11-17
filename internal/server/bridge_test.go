@@ -753,3 +753,185 @@ func TestBridgeRateLimitCircuitBreakerAnd429(t *testing.T) {
 		t.Errorf("expected cooldown_sec > 0 in /bridge/status, got %#v", statusResp)
 	}
 }
+
+func TestCanonicalPathKeyAndDeduplicateBridgeAttachments(t *testing.T) {
+	k1 := canonicalPathKey(`C:\Users\Hau\Desktop\Report.PDF`)
+	k2 := canonicalPathKey(`c:/users/hau/desktop/report.pdf`)
+	if k1 != k2 {
+		t.Errorf("expected case/slash-normalized Windows keys to match, got %q vs %q", k1, k2)
+	}
+
+	b64A := base64.StdEncoding.EncodeToString([]byte("%PDF-1.4 same content"))
+	b64B := base64.StdEncoding.EncodeToString([]byte("%PDF-1.4 different content"))
+	deduped := DeduplicateBridgeAttachments([]bridge.Attachment{
+		{Filename: "report.pdf", MIME: "application/pdf", DataBase64: b64A, Size: 21},
+		{Filename: "report_alias.pdf", MIME: "application/pdf", DataBase64: b64A, Size: 21},
+		{Filename: "second.pdf", MIME: "application/pdf", DataBase64: b64B, Size: 26},
+		{Filename: "SECOND.PDF", MIME: "application/pdf", DataBase64: b64B, Size: 26},
+	})
+	if len(deduped) != 2 {
+		t.Fatalf("expected 2 unique attachments, got %d: %+v", len(deduped), deduped)
+	}
+	if deduped[0].Filename != "report.pdf" || deduped[1].Filename != "second.pdf" {
+		t.Errorf("unexpected deduped filenames: %+v", deduped)
+	}
+}
+
+func TestBridgeDeduplicatesSameFileFromAPIAndLocalPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	pdfPath := filepath.Join(tmpDir, "quarterly.pdf")
+	pdfBytes := []byte("%PDF-1.4\n%dedup-test-content\n%%EOF\n")
+	if err := os.WriteFile(pdfPath, pdfBytes, 0o600); err != nil {
+		t.Fatalf("failed to write temp pdf: %v", err)
+	}
+	pdfB64 := base64.StdEncoding.EncodeToString(pdfBytes)
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeAutoUploadLocalFiles = true
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_dedup", "1")
+
+	var received *bridge.Request
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		req, err := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_dedup", "1", 2*time.Second)
+		if err != nil || req == nil {
+			return
+		}
+		received = req
+		_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "Read cleanly once.", Done: true})
+	}()
+
+	// Send the SAME PDF twice via OpenAI `file` parts AND reference its local path twice in text!
+	bodyMap := map[string]any{
+		"model":  "gemini-4-hydrogen",
+		"stream": false,
+		"messages": []map[string]any{
+			{"role": "system", "content": "Working directory: " + tmpDir},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": "Analyze " + pdfPath + " and quarterly.pdf"},
+					{"type": "file", "file": map[string]any{"filename": "quarterly.pdf", "file_data": "data:application/pdf;base64," + pdfB64}},
+					{"type": "file", "file": map[string]any{"filename": "quarterly.pdf", "file_data": "data:application/pdf;base64," + pdfB64}},
+				},
+			},
+		},
+	}
+	rawBody, _ := json.Marshal(bodyMap)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(rawBody))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	<-workerDone
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if received == nil {
+		t.Fatalf("bridge did not receive request")
+	}
+	if len(received.Attachments) != 1 {
+		t.Fatalf("expected EXACTLY 1 deduplicated attachment, got %d: %+v", len(received.Attachments), received.Attachments)
+	}
+	if received.Attachments[0].Filename != "quarterly.pdf" {
+		t.Errorf("expected quarterly.pdf, got %q", received.Attachments[0].Filename)
+	}
+}
+
+func TestBridgeHistoricalAPIAttachmentNotReuploadedWhenSystemPromptChanges(t *testing.T) {
+	pdfBytes := []byte("%PDF-1.4\n%historical-attachment\n%%EOF\n")
+	pdfB64 := base64.StdEncoding.EncodeToString(pdfBytes)
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeDeltaContext = true
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_main", "1")
+
+	runTurn := func(bodyMap map[string]any, sendBgHeartbeat bool) *bridge.Request {
+		var got *bridge.Request
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			req, err := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_main", "1", 2*time.Second)
+			if err != nil || req == nil {
+				return
+			}
+			got = req
+			if sendBgHeartbeat {
+				// Simulate a second open browser tab sending a heartbeat mid-turn
+				app.Bridge.UpdateTabSession("gemini.google.com", "tab_bg", "1")
+			}
+			_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "OK", Done: true})
+		}()
+		raw, _ := json.Marshal(bodyMap)
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.RemoteAddr = "127.0.0.1:54322"
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		<-done
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return got
+	}
+
+	// Turn 1: attaches report.pdf (while a background tab heartbeats mid-turn)
+	req1 := runTurn(map[string]any{
+		"model":  "gemini-4-hydrogen",
+		"stream": false,
+		"messages": []map[string]any{
+			{"role": "system", "content": "Current time: 10:00"},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": "Summarize this PDF"},
+					{"type": "file", "file": map[string]any{"filename": "report.pdf", "file_data": "data:application/pdf;base64," + pdfB64}},
+				},
+			},
+		},
+	}, true)
+	if req1 == nil || len(req1.Attachments) != 1 {
+		t.Fatalf("turn 1 should upload 1 attachment, got %+v", req1)
+	}
+
+	// Turn 2: system prompt timestamp changed (so delta context misses), history still contains Turn 1's PDF
+	req2 := runTurn(map[string]any{
+		"model":  "gemini-4-hydrogen",
+		"stream": false,
+		"messages": []map[string]any{
+			{"role": "system", "content": "Current time: 10:05"},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": "Summarize this PDF"},
+					{"type": "file", "file": map[string]any{"filename": "report.pdf", "file_data": "data:application/pdf;base64," + pdfB64}},
+				},
+			},
+			{"role": "assistant", "content": "OK"},
+			{"role": "user", "content": "Now explain page 2"},
+		},
+	}, false)
+	if req2 == nil {
+		t.Fatalf("turn 2 did not reach bridge")
+	}
+	if len(req2.Attachments) != 0 {
+		t.Fatalf("turn 2 must NOT re-upload historical report.pdf, got %d attachment(s): %+v", len(req2.Attachments), req2.Attachments)
+	}
+}
+

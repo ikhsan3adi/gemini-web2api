@@ -81,6 +81,12 @@ type inFlightEntry struct {
 	hasChunks  bool
 }
 
+type tabSession struct {
+	convGen       string
+	fingerprints  []string
+	uploadedFiles map[string]string // canonical path or "sha256:..." -> signature
+}
+
 type Hub struct {
 	mu                    sync.Mutex
 	seq                   atomic.Uint64
@@ -101,18 +107,28 @@ type Hub struct {
 	consecutiveRateLimits int
 	activeClientID        string
 	activeConvGen         string
-	sessionFingerprints   []string
-	sessionUploadedFiles  map[string]string // canonical path -> "size:modTimeNano" signature
+	sessions              map[string]*tabSession
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		clientHeartbeats:     make(map[string]time.Time),
-		inFlight:             make(map[string]*inFlightEntry),
-		waiters:              make(map[string]chan Chunk),
-		pollNotify:           make(chan struct{}, 1),
-		sessionUploadedFiles: make(map[string]string),
+		clientHeartbeats: make(map[string]time.Time),
+		inFlight:         make(map[string]*inFlightEntry),
+		waiters:          make(map[string]chan Chunk),
+		pollNotify:       make(chan struct{}, 1),
+		sessions:         make(map[string]*tabSession),
 	}
+}
+
+func (h *Hub) ensureSessionLocked(clientID string) *tabSession {
+	sess, ok := h.sessions[clientID]
+	if !ok {
+		sess = &tabSession{
+			uploadedFiles: make(map[string]string),
+		}
+		h.sessions[clientID] = sess
+	}
+	return sess
 }
 
 // SetMinInterval configures the anti-ban minimum cooldown between consecutive
@@ -213,7 +229,8 @@ func (h *Hub) Heartbeat(tabName, clientID string) {
 }
 
 // UpdateTabSession records liveness and resets conversation delta state whenever
-// the browser tab reloads (new clientID) or starts a fresh chat (new convGen).
+// a tab starts a fresh chat (new convGen), while preserving per-tab state so
+// background heartbeats from other open tabs cannot wipe the active tab's uploads.
 func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 	now := time.Now()
 	h.mu.Lock()
@@ -221,20 +238,32 @@ func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 	if tabName != "" {
 		h.tabName = tabName
 	}
+
+	key := clientID
+	if key == "" {
+		key = h.activeClientID
+	}
+	sess := h.ensureSessionLocked(key)
+
 	if clientID != "" {
 		h.clientHeartbeats[clientID] = now
-		if h.activeClientID != "" && h.activeClientID != clientID {
-			h.sessionFingerprints = nil
-			h.sessionUploadedFiles = make(map[string]string)
-		}
-		h.activeClientID = clientID
 	}
 	if convGen != "" {
-		if h.activeConvGen != "" && h.activeConvGen != convGen {
-			h.sessionFingerprints = nil
-			h.sessionUploadedFiles = make(map[string]string)
+		if sess.convGen != "" && sess.convGen != convGen {
+			sess.fingerprints = nil
+			sess.uploadedFiles = make(map[string]string)
 		}
-		h.activeConvGen = convGen
+		sess.convGen = convGen
+	}
+
+	// Do not let an idle background tab hijack activeClientID while another tab has an in-flight turn
+	if clientID != "" {
+		if h.activeClientID == "" || h.activeClientID == clientID || len(h.inFlight) == 0 {
+			h.activeClientID = clientID
+			h.activeConvGen = sess.convGen
+		}
+	} else if convGen != "" {
+		h.activeConvGen = sess.convGen
 	}
 	h.lastHeartbeat = now
 }
@@ -243,11 +272,12 @@ func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 func (h *Hub) ActiveSession() (clientID, convGen string, uploaded map[string]string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	cp := make(map[string]string, len(h.sessionUploadedFiles))
-	for k, v := range h.sessionUploadedFiles {
+	sess := h.ensureSessionLocked(h.activeClientID)
+	cp := make(map[string]string, len(sess.uploadedFiles))
+	for k, v := range sess.uploadedFiles {
 		cp[k] = v
 	}
-	return h.activeClientID, h.activeConvGen, cp
+	return h.activeClientID, sess.convGen, cp
 }
 
 // MatchDeltaPrefix returns the number of leading messages already present in the
@@ -255,7 +285,8 @@ func (h *Hub) ActiveSession() (clientID, convGen string, uploaded map[string]str
 func (h *Hub) MatchDeltaPrefix(fingerprints []string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	prev := h.sessionFingerprints
+	sess := h.ensureSessionLocked(h.activeClientID)
+	prev := sess.fingerprints
 	if len(prev) == 0 || len(fingerprints) <= len(prev) {
 		return 0
 	}
@@ -268,20 +299,24 @@ func (h *Hub) MatchDeltaPrefix(fingerprints []string) int {
 }
 
 // RecordTurnSuccess saves the conversation prefix and uploaded file signatures for the
-// active tab session so subsequent follow-up turns can send compact deltas and avoid
+// tab session so subsequent follow-up turns can send compact deltas and avoid
 // re-uploading unchanged files while automatically refreshing edited code files.
 func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string, uploadedSigs map[string]string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if clientID != h.activeClientID || convGen != h.activeConvGen {
+	sess := h.ensureSessionLocked(clientID)
+	if convGen != "" && sess.convGen != "" && convGen != sess.convGen {
 		return
+	}
+	if convGen != "" && sess.convGen == "" {
+		sess.convGen = convGen
 	}
 	cp := make([]string, len(fingerprints))
 	copy(cp, fingerprints)
-	h.sessionFingerprints = cp
+	sess.fingerprints = cp
 	for path, sig := range uploadedSigs {
 		if path != "" {
-			h.sessionUploadedFiles[path] = sig
+			sess.uploadedFiles[path] = sig
 		}
 	}
 }

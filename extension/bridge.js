@@ -587,13 +587,163 @@
     return new Uint8Array(0);
   }
 
+  function deduplicateAttachments(attachments) {
+    if (!Array.isArray(attachments) || attachments.length === 0) return [];
+    const out = [];
+    const seenPayload = new Set();
+    const seenName = new Set();
+    for (const att of attachments) {
+      if (!att || typeof att !== "object" || !att.data_base64) continue;
+      const b64 = String(att.data_base64);
+      if (b64.length === 0) continue;
+      const payloadKey = `${b64.length}:${b64.slice(0, 64)}:${b64.slice(-64)}`;
+      if (seenPayload.has(payloadKey)) continue;
+      const nameKey = String(att.filename || "").trim().toLowerCase();
+      if (nameKey && seenName.has(nameKey)) continue;
+      seenPayload.add(payloadKey);
+      if (nameKey) seenName.add(nameKey);
+      out.push(att);
+    }
+    return out;
+  }
+
   function buildAttachedFileNote(attachments) {
     if (!Array.isArray(attachments) || attachments.length === 0) return "";
-    const names = attachments
-      .map((a) => (a && a.filename ? String(a.filename).trim() : ""))
-      .filter(Boolean);
+    const seen = new Set();
+    const names = [];
+    for (const a of attachments) {
+      const name = a && a.filename ? String(a.filename).trim() : "";
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      names.push(name);
+    }
     if (names.length === 0) return "";
     return `[Directly attached file(s): ${names.join(", ")}. Read the attached file(s) natively in full — do NOT call local shell/python/file tools to inspect or extract them.]`;
+  }
+
+  function findComposerScope(inputArea, root) {
+    if (inputArea && inputArea.nodeType === 1) {
+      const container = closestDeep(
+        inputArea,
+        "form, [class*='composer'], [class*='input-area'], [class*='chat-input'], [class*='prompt-area'], [class*='input-box'], [class*='search-box'], [class*='query-input'], ucs-proactive-search-bar, ucs-search-bar, ucs-chat-input"
+      );
+      if (container) {
+        const tag = String(container.tagName || "").toUpperCase();
+        if (tag !== "BODY" && tag !== "HTML" && tag !== "MAIN") {
+          return container;
+        }
+      }
+      // Walk up a couple shadow-aware parents so sibling chip bars above the input are included
+      let cur = inputArea;
+      for (let i = 0; i < 4 && cur; i++) {
+        const parent = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
+        if (!parent) break;
+        const pTag = String(parent.tagName || "").toUpperCase();
+        if (pTag === "BODY" || pTag === "HTML" || pTag === "MAIN") break;
+        cur = parent;
+      }
+      if (cur && cur !== inputArea) return cur;
+    }
+    return root || (typeof document !== "undefined" ? document : null);
+  }
+
+  function walkElementsDeep(root, visitor) {
+    if (!root) return;
+    const stack = [root];
+    const seen = new Set();
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || seen.has(node)) continue;
+      seen.add(node);
+      if (node.nodeType === 1) {
+        if (isOwnExtensionElement(node)) continue;
+        visitor(node);
+        if (node.shadowRoot) {
+          stack.push(node.shadowRoot);
+        }
+      }
+      const children = node.children || node.childNodes;
+      if (children && children.length) {
+        for (let i = children.length - 1; i >= 0; i--) {
+          const child = children[i];
+          if (child && (child.nodeType === 1 || child.nodeType === 11)) {
+            stack.push(child);
+          }
+        }
+      }
+    }
+  }
+
+  function countAttachmentChipsInDom(inputArea, root) {
+    const scope = findComposerScope(inputArea, root);
+    if (!scope) return { chipCount: 0, removeBtnCount: 0 };
+
+    let chipCount = 0;
+    let removeBtnCount = 0;
+    const countedChips = [];
+
+    walkElementsDeep(scope, (el) => {
+      if (inputArea && (el === inputArea || containsDeep(inputArea, el))) return;
+      const tag = String(el.tagName || "").toLowerCase();
+      const cls = typeof el.className === "string" ? el.className.toLowerCase() : "";
+      const testId = String((el.getAttribute && el.getAttribute("data-test-id")) || "").toLowerCase();
+      const role = String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
+      const aria = String((el.getAttribute && el.getAttribute("aria-label")) || "").toLowerCase();
+      const title = String((el.getAttribute && el.getAttribute("title")) || "").toLowerCase();
+      const tooltip = String((el.getAttribute && el.getAttribute("data-tooltip")) || "").toLowerCase();
+
+      // Count remove/delete attachment buttons inside the composer
+      const isBtn = tag === "button" || role === "button" || tag.includes("icon-button") || tag.includes("button");
+      const btnSignal = `${aria} ${title} ${tooltip}`;
+      if (isBtn && /\b(remove|delete|detach|discard|clear file|cancel upload|close)\b/.test(btnSignal)) {
+        // Avoid counting generic modal/menu close buttons outside file items unless labeled remove/delete/detach/file
+        if (/\b(remove|delete|detach|discard|file|attachment|upload)\b/.test(btnSignal)) {
+          removeBtnCount++;
+        }
+        return;
+      }
+
+      // Count attachment chip / file preview elements (including custom Lit elements like ucs-file-preview)
+      const looksLikeChip =
+        /(file|attach|upload)/.test(tag) ||
+        tag.includes("chip") ||
+        /\b(file-chip|file-card|file-preview|file-item|attachment-chip|attachment-card|attachment-item|uploaded-file|upload-chip|context-file)\b/.test(cls) ||
+        /(file|attach|chip|upload)/.test(testId) ||
+        role === "listitem";
+
+      if (looksLikeChip && !isBtn && tag !== "input") {
+        // Skip wrapper elements that already contain or sit inside a counted chip
+        const alreadyNested = countedChips.some((prev) => containsDeep(prev, el) || containsDeep(el, prev));
+        if (!alreadyNested) {
+          const text = String(extractControlLabel(el) || "").trim();
+          // Ignore empty hidden containers
+          if (text.length > 0 && text.length <= 400) {
+            countedChips.push(el);
+            chipCount++;
+          }
+        }
+      }
+    });
+
+    return { chipCount, removeBtnCount };
+  }
+
+  function matchesFilenameInText(text, filename) {
+    if (!text || !filename) return false;
+    if (text.includes(filename)) return true;
+    // Handle middle/end truncation in chips, e.g. "very_long_report_2026.pdf" -> "very_long_...pdf" or "very_long_…"
+    const dotIdx = filename.lastIndexOf(".");
+    const stem = dotIdx > 0 ? filename.slice(0, dotIdx) : filename;
+    const ext = dotIdx > 0 ? filename.slice(dotIdx) : "";
+    if (stem.length >= 10) {
+      const prefix = stem.slice(0, 8);
+      if (text.includes(prefix) && (!ext || text.includes(ext) || text.includes("...") || text.includes("…"))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function hasAttachmentChipInDom(filenames, inputArea, root) {
@@ -603,26 +753,60 @@
       .filter(Boolean);
     if (lowered.length === 0) return false;
 
-    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    const searchRoot = findComposerScope(inputArea, root);
     if (!searchRoot) return false;
 
-    // Look for attachment chip / file card elements outside our badge and outside the text input
-    const candidates = queryDeep(
-      "[class*='file'], [class*='attach'], [class*='chip'], [class*='upload'], [data-test-id*='file'], [data-test-id*='attach'], [role='listitem'], [aria-label]",
-      searchRoot
-    );
-    for (const el of candidates) {
-      if (isOwnExtensionElement(el)) continue;
-      if (inputArea && (el === inputArea || containsDeep(inputArea, el))) continue;
+    let matched = false;
+    walkElementsDeep(searchRoot, (el) => {
+      if (matched) return;
+      if (inputArea && (el === inputArea || containsDeep(inputArea, el))) return;
+
+      const tag = String(el.tagName || "").toLowerCase();
+      const cls = typeof el.className === "string" ? el.className.toLowerCase() : "";
+      const testId = String((el.getAttribute && el.getAttribute("data-test-id")) || "").toLowerCase();
+      const role = String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
       const aria = String((el.getAttribute && el.getAttribute("aria-label")) || "").toLowerCase();
       const title = String((el.getAttribute && el.getAttribute("title")) || "").toLowerCase();
+
+      const isCandidate =
+        /(file|attach|chip|upload|preview)/.test(tag) ||
+        /(file|attach|chip|upload|preview)/.test(cls) ||
+        /(file|attach|chip|upload)/.test(testId) ||
+        role === "listitem" ||
+        aria.length > 0 ||
+        title.length > 0;
+      if (!isCandidate) return;
+
       const text = String(extractControlLabel(el) || "").trim().toLowerCase();
-      if (text.length > 400) continue;
+      if (text.length > 400) return;
+
       for (const name of lowered) {
-        if ((aria && aria.includes(name)) || (title && title.includes(name)) || (text && text.includes(name))) {
-          return true;
+        if (
+          matchesFilenameInText(aria, name) ||
+          matchesFilenameInText(title, name) ||
+          matchesFilenameInText(text, name)
+        ) {
+          matched = true;
+          return;
         }
       }
+    });
+    return matched;
+  }
+
+  function isSameConversationUrlTransition(prevUrlKey, nextUrlKey) {
+    const normalizePath = (raw) => {
+      const s = String(raw || "");
+      const pathOnly = s.split(/[?#]/)[0];
+      return pathOnly.replace(/\/+$/, "") || "/";
+    };
+    const prevPath = normalizePath(prevUrlKey);
+    const nextPath = normalizePath(nextUrlKey);
+    if (prevPath === nextPath) return true;
+    // Initial turn session-ID assignment: e.g. /app -> /app/abc123 or
+    // /home/cid/<cid> -> /home/cid/<cid>/r/session/<sid>
+    if (prevPath !== "/" && nextPath.startsWith(prevPath + "/")) {
+      return true;
     }
     return false;
   }
@@ -995,8 +1179,11 @@
       snapshotResponses,
       extractActiveDomResponseText,
       base64ToUint8Array,
+      deduplicateAttachments,
       buildAttachedFileNote,
+      countAttachmentChipsInDom,
       hasAttachmentChipInDom,
+      isSameConversationUrlTransition,
       isLinkOrPromoElement,
       isRateLimitMessage,
       findModelOption,
@@ -1011,6 +1198,9 @@
   // Live Browser Bridge Runtime
   // ---------------------------------------------------------------------------
 
+  if (!globalScope || globalScope.__web2apiBridgeInstalled) return;
+  globalScope.__web2apiBridgeInstalled = true;
+
   const CLIENT_ID = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   console.log("[Web2API Bridge] Initializing live web bridge on", location.hostname, "client:", CLIENT_ID);
 
@@ -1023,6 +1213,8 @@
   let convGen = 1;
   let lastConvUrlKey = `${location.pathname}${location.search}`;
   let hadResponsesInConv = false;
+  let hadDomResponsesInConv = false;
+  let preferredUploadMethod = null;
 
   const uploadTracker = {
     inFlightIds: new Set(),
@@ -1035,25 +1227,30 @@
   function syncConversationGeneration() {
     const curUrlKey = `${location.pathname}${location.search}`;
     if (curUrlKey !== lastConvUrlKey) {
+      const sameConv = isSameConversationUrlTransition(lastConvUrlKey, curUrlKey);
       lastConvUrlKey = curUrlKey;
       // Only treat URL navigation as a fresh conversation if we already saw replies
-      // in the previous conversation (avoids spurious bump when Google assigns a /cid/
-      // on the very first turn of a brand-new chat).
-      if (hadResponsesInConv) {
+      // AND the URL moved away from this conversation (not initial session-ID assignment
+      // like /home/cid/<id> -> /home/cid/<id>/r/session/<sid> or query params like ?pli=1).
+      if (hadResponsesInConv && !sameConv) {
         convGen++;
         hadResponsesInConv = false;
-        console.log("[Web2API Bridge] Conversation URL changed after prior replies -> conv_gen:", convGen);
+        hadDomResponsesInConv = false;
+        console.log("[Web2API Bridge] Conversation URL changed to new chat -> conv_gen:", convGen);
       }
       return;
     }
 
-    // Detect SPA "New Chat" reset where all prior response elements disappeared
-    if (hadResponsesInConv && !activeReqId) {
+    // Detect SPA "New Chat" reset ONLY if DOM responses were previously visible in this chat
+    // (avoids false New Chat resets on Vertex AI Search when replies come via net-hook.js
+    // and DOM selectors don't match custom Shadow DOM response components).
+    if (hadResponsesInConv && hadDomResponsesInConv && !activeReqId) {
       try {
         const curResponses = findResponseElements(lastFocusedInput, "");
         if (curResponses.length === 0) {
           convGen++;
           hadResponsesInConv = false;
+          hadDomResponsesInConv = false;
           console.log("[Web2API Bridge] Detected New Chat reset -> conv_gen:", convGen);
         }
       } catch (e) {}
@@ -1807,18 +2004,31 @@
     return best;
   }
 
+  function checkUploadTriggerSignal(filenames, inputArea, snap) {
+    if (uploadTracker.startedCount > snap.startedCount) {
+      return "network";
+    }
+    if (snap.armId && uploadTracker.injectedArmIds.has(snap.armId)) {
+      return "injected";
+    }
+    const curChips = countAttachmentChipsInDom(inputArea);
+    if (
+      curChips.chipCount > snap.beforeChips.chipCount ||
+      curChips.removeBtnCount > snap.beforeChips.removeBtnCount
+    ) {
+      return "chip_count";
+    }
+    if (!snap.beforeMatchedChip && hasAttachmentChipInDom(filenames, inputArea)) {
+      return "chip";
+    }
+    return null;
+  }
+
   async function waitForUploadTrigger(filenames, inputArea, snap, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (uploadTracker.startedCount > snap.startedCount) {
-        return "network";
-      }
-      if (snap.armId && uploadTracker.injectedArmIds.has(snap.armId)) {
-        return "injected";
-      }
-      if (hasAttachmentChipInDom(filenames, inputArea)) {
-        return "chip";
-      }
+      const sig = checkUploadTriggerSignal(filenames, inputArea, snap);
+      if (sig) return sig;
       await new Promise((r) => setTimeout(r, 90));
     }
     return null;
@@ -1830,7 +2040,7 @@
     while (
       Date.now() < kickDeadline &&
       uploadTracker.startedCount === snap.startedCount &&
-      !hasAttachmentChipInDom(filenames, inputArea)
+      !checkUploadTriggerSignal(filenames, inputArea, snap)
     ) {
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -1852,7 +2062,15 @@
 
     // Wait briefly for UI chip / send button to settle
     const chipDeadline = Date.now() + 3000;
-    while (Date.now() < chipDeadline && !hasAttachmentChipInDom(filenames, inputArea)) {
+    while (Date.now() < chipDeadline) {
+      const curChips = countAttachmentChipsInDom(inputArea);
+      if (
+        curChips.chipCount > snap.beforeChips.chipCount ||
+        curChips.removeBtnCount > snap.beforeChips.removeBtnCount ||
+        (!snap.beforeMatchedChip && hasAttachmentChipInDom(filenames, inputArea))
+      ) {
+        break;
+      }
       await new Promise((r) => setTimeout(r, 120));
     }
     await new Promise((r) => setTimeout(r, 450));
@@ -1860,12 +2078,13 @@
   }
 
   async function uploadAttachmentsToPage(attachments, inputArea) {
-    if (!Array.isArray(attachments) || attachments.length === 0) {
+    const uniqueAttachments = deduplicateAttachments(attachments);
+    if (uniqueAttachments.length === 0) {
       return { ok: false, method: "none" };
     }
 
-    const filenames = attachments.map((a) => (a && a.filename) || "attachment");
-    const dt = buildDataTransferFromAttachments(attachments);
+    const filenames = uniqueAttachments.map((a) => (a && a.filename) || "attachment");
+    const dt = buildDataTransferFromAttachments(uniqueAttachments);
     if (dt.files.length === 0) {
       return { ok: false, method: "empty" };
     }
@@ -1874,112 +2093,141 @@
       startedCount: uploadTracker.startedCount,
       doneCount: uploadTracker.doneCount,
       errorCount: uploadTracker.errorCount,
+      beforeChips: countAttachmentChipsInDom(inputArea),
+      beforeMatchedChip: hasAttachmentChipInDom(filenames, inputArea),
       armId: null
     };
 
-    // Tier 1: Direct assignment to an existing <input type="file"> in DOM / Shadow DOM
-    const existingInput = findBestFileInput(inputArea);
-    if (existingInput) {
-      try {
-        existingInput.files = dt.files;
-        existingInput.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        existingInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 700);
-        if (triggered) {
-          const ready = await waitForUploadsReady(filenames, inputArea, snap);
-          if (ready) {
-            console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 1 (<input type=file>)");
-            return { ok: true, method: "file_input" };
-          }
-        }
-      } catch (e) {
-        console.warn("[Web2API Bridge] Tier 1 file input error:", e);
-      }
-    }
+    // Prioritize whichever upload tier already succeeded on this site to avoid probing
+    // failing tiers (and prevent any chance of double-uploading across tiers).
+    const defaultTiers = ["file_input", "drag_drop", "click_trap"];
+    const tierOrder = preferredUploadMethod
+      ? [preferredUploadMethod, ...defaultTiers.filter((t) => t !== preferredUploadMethod)]
+      : defaultTiers;
 
-    // Tier 2: Synthetic Drag-and-Drop onto chat input / composer container
-    try {
-      const dropTargets = [inputArea];
-      const container = closestDeep(
-        inputArea,
-        "form, [class*='composer'], [class*='input-area'], [class*='chat-input'], [class*='prompt'], main"
-      );
-      if (container && container !== inputArea) {
-        dropTargets.push(container);
+    for (const tier of tierOrder) {
+      // Safety abort: if a prior attempt already started uploading or added a chip, NEVER try another tier!
+      if (checkUploadTriggerSignal(filenames, inputArea, snap)) {
+        const ready = await waitForUploadsReady(filenames, inputArea, snap);
+        return { ok: ready, method: preferredUploadMethod || "detected" };
       }
 
-      for (const target of dropTargets) {
-        if (!target) continue;
-        const freshDt = buildDataTransferFromAttachments(attachments);
-        for (const evName of ["dragenter", "dragover", "drop"]) {
-          let ev;
-          try {
-            ev = new DragEvent(evName, {
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-              dataTransfer: freshDt
-            });
-          } catch (err) {
-            ev = new Event(evName, { bubbles: true, cancelable: true, composed: true });
-            Object.defineProperty(ev, "dataTransfer", { value: freshDt });
+      if (tier === "file_input") {
+        // Tier 1: Direct assignment to an existing <input type="file"> in DOM / Shadow DOM
+        const existingInput = findBestFileInput(inputArea);
+        if (!existingInput) continue;
+        try {
+          // Clear previous value so re-uploading an updated file with the same name still fires `change`
+          try { existingInput.value = ""; } catch (e) {}
+          const freshDt = buildDataTransferFromAttachments(uniqueAttachments);
+          existingInput.files = freshDt.files;
+          // Dispatch ONLY `change` (firing both `input` and `change` triggers duplicate uploads
+          // on Angular/Lit components that listen to both events).
+          existingInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+
+          const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1600);
+          if (triggered) {
+            const ready = await waitForUploadsReady(filenames, inputArea, snap);
+            if (ready) {
+              preferredUploadMethod = "file_input";
+              console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 1 (<input type=file>, signal:", triggered + ")");
+              return { ok: true, method: "file_input" };
+            }
+            // If the page already accepted the files (chip or upload started), never cascade into Tier 2/3
+            // to avoid duplicating files.
+            return { ok: false, method: "file_input_error" };
           }
-          target.dispatchEvent(ev);
+          // Tier 1 produced zero signal — clear input so a dormant FileList cannot double-submit later
+          try { existingInput.value = ""; } catch (e) {}
+        } catch (e) {
+          console.warn("[Web2API Bridge] Tier 1 file input error:", e);
         }
+      } else if (tier === "drag_drop") {
+        // Tier 2: Single synthetic Drag-and-Drop onto ONE target (bubbles naturally to composer/form;
+        // dispatching on both inputArea AND container caused duplicate drop handling!).
+        try {
+          const dropTarget =
+            inputArea ||
+            closestDeep(
+              inputArea,
+              "form, [class*='composer'], [class*='input-area'], [class*='chat-input'], [class*='prompt'], main"
+            );
+          if (!dropTarget) continue;
 
-        const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 750);
-        if (triggered) {
-          const ready = await waitForUploadsReady(filenames, inputArea, snap);
-          if (ready) {
-            console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 2 (drag-and-drop)");
-            return { ok: true, method: "drag_drop" };
+          const freshDt = buildDataTransferFromAttachments(uniqueAttachments);
+          for (const evName of ["dragenter", "dragover", "drop"]) {
+            let ev;
+            try {
+              ev = new DragEvent(evName, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                dataTransfer: freshDt
+              });
+            } catch (err) {
+              ev = new Event(evName, { bubbles: true, cancelable: true, composed: true });
+              Object.defineProperty(ev, "dataTransfer", { value: freshDt });
+            }
+            dropTarget.dispatchEvent(ev);
           }
-        }
-      }
-    } catch (e) {
-      console.warn("[Web2API Bridge] Tier 2 drag-drop error:", e);
-    }
 
-    // Tier 3: Armed MAIN-world click trap + clicking the page's '+' / Attach / Upload button
-    const attachBtn = findAttachButton(inputArea);
-    if (attachBtn) {
-      const armId = `arm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      snap.armId = armId;
-      try {
-        window.postMessage(
-          {
-            __web2api_upload_arm: true,
-            armId,
-            files: attachments
-          },
-          "*"
-        );
-        await new Promise((r) => setTimeout(r, 60));
-
-        simulateClick(attachBtn);
-        let triggered = await waitForUploadTrigger(filenames, inputArea, snap, 550);
-
-        if (!triggered) {
-          // Clicking '+' likely opened a popover menu ("Upload files" / "Upload from computer")
-          const menuOpt = findUploadMenuOption(document, attachBtn);
-          if (menuOpt) {
-            simulateClick(menuOpt);
-            triggered = await waitForUploadTrigger(filenames, inputArea, snap, 750);
+          const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1600);
+          if (triggered) {
+            const ready = await waitForUploadsReady(filenames, inputArea, snap);
+            if (ready) {
+              preferredUploadMethod = "drag_drop";
+              console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 2 (drag-and-drop, signal:", triggered + ")");
+              return { ok: true, method: "drag_drop" };
+            }
+            return { ok: false, method: "drag_drop_error" };
           }
+        } catch (e) {
+          console.warn("[Web2API Bridge] Tier 2 drag-drop error:", e);
         }
+      } else if (tier === "click_trap") {
+        // Tier 3: Armed MAIN-world click trap + clicking the page's '+' / Attach / Upload button
+        const attachBtn = findAttachButton(inputArea);
+        if (!attachBtn) continue;
+        const armId = `arm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        snap.armId = armId;
+        try {
+          window.postMessage(
+            {
+              __web2api_upload_arm: true,
+              armId,
+              files: uniqueAttachments
+            },
+            "*"
+          );
+          await new Promise((r) => setTimeout(r, 60));
 
-        if (triggered) {
-          const ready = await waitForUploadsReady(filenames, inputArea, snap);
-          if (ready) {
-            console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 3 (attach button + click trap)");
-            return { ok: true, method: "click_trap" };
+          simulateClick(attachBtn);
+          let triggered = await waitForUploadTrigger(filenames, inputArea, snap, 700);
+
+          if (!triggered) {
+            // Clicking '+' likely opened a popover menu ("Upload files" / "Upload from computer")
+            const menuOpt = findUploadMenuOption(document, attachBtn);
+            if (menuOpt) {
+              simulateClick(menuOpt);
+              triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1200);
+            }
           }
+
+          if (triggered) {
+            const ready = await waitForUploadsReady(filenames, inputArea, snap);
+            if (ready) {
+              preferredUploadMethod = "click_trap";
+              console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 3 (attach button + click trap, signal:", triggered + ")");
+              return { ok: true, method: "click_trap" };
+            }
+            return { ok: false, method: "click_trap_error" };
+          }
+        } catch (e) {
+          console.warn("[Web2API Bridge] Tier 3 click-trap upload error:", e);
+        } finally {
+          window.postMessage({ __web2api_upload_disarm: true, armId }, "*");
+          closeAnyOpenDropdown();
         }
-      } catch (e) {
-        console.warn("[Web2API Bridge] Tier 3 click-trap upload error:", e);
-      } finally {
-        window.postMessage({ __web2api_upload_disarm: true, armId }, "*");
-        closeAnyOpenDropdown();
       }
     }
 
@@ -2030,13 +2278,14 @@
 
     // B2. Directly upload any attached PDFs/documents/images to the Gemini page
     let effectivePrompt = prompt;
-    if (Array.isArray(attachments) && attachments.length > 0) {
-      const label = attachments.map((a) => (a && a.filename) || "file").join(", ");
+    const uniqueAttachments = deduplicateAttachments(attachments);
+    if (uniqueAttachments.length > 0) {
+      const label = uniqueAttachments.map((a) => (a && a.filename) || "file").join(", ");
       setStatus("busy", `Web2API: Uploading ${label}... 📎`);
       try {
-        const uploadRes = await uploadAttachmentsToPage(attachments, inputArea);
+        const uploadRes = await uploadAttachmentsToPage(uniqueAttachments, inputArea);
         if (uploadRes && uploadRes.ok) {
-          const note = buildAttachedFileNote(attachments);
+          const note = buildAttachedFileNote(uniqueAttachments);
           if (note) {
             effectivePrompt = `${note}\n\n${prompt}`;
           }
@@ -2068,6 +2317,11 @@
       await observeResponseStream(reqId, inputArea, effectivePrompt, baselineMap, netCapture);
       lastConvUrlKey = `${location.pathname}${location.search}`;
       hadResponsesInConv = true;
+      try {
+        if (findResponseElements(inputArea, "").length > 0) {
+          hadDomResponsesInConv = true;
+        }
+      } catch (e) {}
     } finally {
       if (activeNetCapture === netCapture) {
         activeNetCapture = null;
@@ -2078,6 +2332,7 @@
     if (autoRefreshEnabled) {
       convGen++;
       hadResponsesInConv = false;
+      hadDomResponsesInConv = false;
       setStatus("busy", "Web2API: Refreshing page for next request...");
       await new Promise((r) => setTimeout(r, 600));
       resetOrRefreshPage();

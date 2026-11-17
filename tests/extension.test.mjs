@@ -773,4 +773,170 @@ test("isRateLimitMessage detects Google 429 / quota / traffic warnings", () => {
   assert.equal(bridge.isRateLimitMessage(""), false);
 });
 
+// ---------------------------------------------------------------------------
+// 8. Regression tests: prevent duplicate file uploads in Gemini Enterprise
+// ---------------------------------------------------------------------------
+
+test("deduplicateAttachments removes identical payloads and duplicate filenames", () => {
+  const b64A = Buffer.from("%PDF-1.4\nhello world").toString("base64");
+  const b64B = Buffer.from("%PDF-1.4\nsecond doc").toString("base64");
+
+  const result = bridge.deduplicateAttachments([
+    { filename: "report.pdf", mime: "application/pdf", data_base64: b64A },
+    // Same content under a different alias -> must be dropped
+    { filename: "report_copy.pdf", mime: "application/pdf", data_base64: b64A },
+    // Same filename (case-insensitive) -> must be dropped
+    { filename: "REPORT.PDF", mime: "application/pdf", data_base64: b64B },
+    // Distinct file -> must be kept
+    { filename: "notes.pdf", mime: "application/pdf", data_base64: b64B },
+    // Invalid entry -> must be dropped
+    { filename: "empty.pdf", mime: "application/pdf", data_base64: "" }
+  ]);
+
+  assert.equal(result.length, 2);
+  assert.equal(result[0].filename, "report.pdf");
+  assert.equal(result[1].filename, "notes.pdf");
+});
+
+test("countAttachmentChipsInDom & hasAttachmentChipInDom detect truncated chips, custom elements, and ignore old chat turns", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  // Earlier conversation history outside composer mentioning the same filename
+  const history = el("div", { class: "conversation-history" });
+  const oldChip = el("div", { class: "file-chip" });
+  oldChip.appendChild(txt("very_long_quarterly_report_2026.pdf"));
+  history.appendChild(oldChip);
+  doc.body.appendChild(history);
+
+  // Composer inside Shadow DOM
+  const composerHost = el("ucs-search-bar");
+  const shadow = composerHost.attachShadow();
+  const form = el("form", { class: "chat-input" });
+  const textarea = el("textarea");
+  form.appendChild(textarea);
+  shadow.appendChild(form);
+  doc.body.appendChild(composerHost);
+
+  // Must NOT match the historical turn's chip outside the composer!
+  assert.equal(bridge.hasAttachmentChipInDom(["very_long_quarterly_report_2026.pdf"], textarea, doc), false);
+  const before = bridge.countAttachmentChipsInDom(textarea, doc);
+  assert.equal(before.chipCount, 0);
+  assert.equal(before.removeBtnCount, 0);
+
+  // Vertex AI Search renders a custom Lit element with a truncated filename + Remove button
+  const litChip = el("ucs-file-preview");
+  const labelSpan = el("span");
+  labelSpan.appendChild(txt("very_long_...pdf"));
+  const removeBtn = el("button", { "aria-label": "Remove file" });
+  removeBtn.appendChild(txt("close"));
+  litChip.appendChild(labelSpan);
+  litChip.appendChild(removeBtn);
+  form.appendChild(litChip);
+
+  const after = bridge.countAttachmentChipsInDom(textarea, doc);
+  assert.equal(after.chipCount, 1);
+  assert.equal(after.removeBtnCount, 1);
+  assert.equal(bridge.hasAttachmentChipInDom(["very_long_quarterly_report_2026.pdf"], textarea, doc), true);
+});
+
+test("isSameConversationUrlTransition avoids spurious conv_gen bumps on Vertex AI Search", () => {
+  // Initial session URL assignment after Turn 1 -> same conversation
+  assert.equal(
+    bridge.isSameConversationUrlTransition(
+      "/home/cid/d705464c-a3ec-4576-8d00-06473555abff",
+      "/home/cid/d705464c-a3ec-4576-8d00-06473555abff/r/session/abc123?pli=1"
+    ),
+    true
+  );
+  // Query parameter changes alone -> same conversation
+  assert.equal(
+    bridge.isSameConversationUrlTransition("/home/cid/d705?pli=1", "/home/cid/d705?pli=2"),
+    true
+  );
+  // Navigating back to root or switching to another session -> new conversation
+  assert.equal(
+    bridge.isSameConversationUrlTransition(
+      "/home/cid/d705/r/session/abc123",
+      "/home/cid/d705"
+    ),
+    false
+  );
+  assert.equal(
+    bridge.isSameConversationUrlTransition(
+      "/home/cid/d705/r/session/abc123",
+      "/home/cid/d705/r/session/xyz999"
+    ),
+    false
+  );
+});
+
+test("classifyUploadEndpoint detects Vertex session file uploads and FormData/multipart bodies", () => {
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetAddSessionFile",
+      "POST"
+    ),
+    true
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://discoveryengine.googleapis.com/v1alpha/locations/global/batchAddContextFile",
+      "POST"
+    ),
+    true
+  );
+  // Unknown Google endpoint with multipart/form-data content-type
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://vertexaisearch.cloud.google.com/internal/files/attach",
+      "POST",
+      null,
+      "multipart/form-data; boundary=----WebKitFormBoundary"
+    ),
+    true
+  );
+  // Unknown Google endpoint with JSON fileContent payload
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://vertexaisearch.cloud.google.com/internal/rpc",
+      "POST",
+      JSON.stringify({ fileName: "report.pdf", fileContent: "A".repeat(300) }),
+      "application/json"
+    ),
+    true
+  );
+  // Never misclassify localhost bridge requests or chat streaming endpoints
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "http://localhost:8081/bridge/chunk",
+      "POST",
+      JSON.stringify({ fileName: "x.pdf", fileContent: "A".repeat(300) }),
+      "multipart/form-data"
+    ),
+    false
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
+      "POST",
+      JSON.stringify({ fileName: "x.pdf", fileContent: "A".repeat(300) }),
+      "application/json"
+    ),
+    false
+  );
+});
+
+test("Upload injection dispatches change-only on file input and single drop target (no double-upload)", () => {
+  const bridgeSrc = fs.readFileSync(path.resolve("extension/bridge.js"), "utf8");
+  const netHookSrc = fs.readFileSync(path.resolve("extension/net-hook.js"), "utf8");
+
+  // Neither file-input Tier 1 nor click-trap may fire BOTH `input` and `change` back-to-back
+  assert.equal(/existingInput\.dispatchEvent\(new Event\("input"/.test(bridgeSrc), false);
+  assert.equal(/this\.dispatchEvent\(new Event\("input"/.test(netHookSrc), false);
+
+  // Tier 2 drag-and-drop must dispatch on ONE target only (never looping over dropTargets)
+  assert.equal(/for\s*\(\s*const\s+target\s+of\s+dropTargets\s*\)/.test(bridgeSrc), false);
+});
+
+
 

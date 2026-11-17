@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/bridge"
@@ -237,6 +238,72 @@ func fileVersionSignature(info os.FileInfo) string {
 	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 }
 
+// canonicalPathKey produces a stable dedup key across symlinks, slash styles,
+// and case-insensitive Windows drive/folder paths.
+func canonicalPathKey(p string) string {
+	trimmed := strings.TrimSpace(p)
+	isWindowsDrive := len(trimmed) >= 2 && trimmed[1] == ':' &&
+		((trimmed[0] >= 'a' && trimmed[0] <= 'z') || (trimmed[0] >= 'A' && trimmed[0] <= 'Z'))
+	if isWindowsDrive && runtime.GOOS != "windows" {
+		// Normalize Windows drive paths deterministically even when tested on Linux/macOS
+		norm := strings.ReplaceAll(trimmed, `\`, "/")
+		norm = strings.ToLower(filepath.Clean(norm))
+		return strings.ReplaceAll(norm, "/", `\`)
+	}
+	cleaned := filepath.Clean(trimmed)
+	if abs, err := filepath.Abs(cleaned); err == nil {
+		cleaned = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil && resolved != "" {
+		cleaned = resolved
+	}
+	cleaned = filepath.Clean(cleaned)
+	if runtime.GOOS == "windows" {
+		cleaned = strings.ToLower(strings.ReplaceAll(cleaned, "/", `\`))
+	}
+	return cleaned
+}
+
+func attachmentContentHash(att bridge.Attachment) string {
+	sum := sha256.Sum256([]byte(att.DataBase64))
+	return hex.EncodeToString(sum[:])
+}
+
+// DeduplicateBridgeAttachments removes duplicate attachments within a single turn
+// by exact content SHA-256 digest (and identical filename+size), ensuring the
+// browser bridge never receives two copies of the same file.
+func DeduplicateBridgeAttachments(attachments []bridge.Attachment) []bridge.Attachment {
+	if len(attachments) <= 1 {
+		return attachments
+	}
+	seenHash := make(map[string]bool, len(attachments))
+	seenNameSize := make(map[string]bool, len(attachments))
+	out := make([]bridge.Attachment, 0, len(attachments))
+	for _, att := range attachments {
+		if att.DataBase64 == "" {
+			continue
+		}
+		h := attachmentContentHash(att)
+		if seenHash[h] {
+			continue
+		}
+		nameKey := strings.ToLower(strings.TrimSpace(att.Filename))
+		nameSizeKey := ""
+		if nameKey != "" && att.Size > 0 {
+			nameSizeKey = fmt.Sprintf("%s:%d", nameKey, att.Size)
+			if seenNameSize[nameSizeKey] {
+				continue
+			}
+		}
+		seenHash[h] = true
+		if nameSizeKey != "" {
+			seenNameSize[nameSizeKey] = true
+		}
+		out = append(out, att)
+	}
+	return out
+}
+
 func resolveAndReadLocalFile(candidate string, baseDirs []string, largeCodeMinBytes int) (absPath string, sig string, att bridge.Attachment, ok bool) {
 	ext := strings.ToLower(filepath.Ext(candidate))
 	mime, isDocOrMedia := allowedBinaryDocExts[ext]
@@ -287,7 +354,7 @@ func resolveAndReadLocalFile(candidate string, baseDirs []string, largeCodeMinBy
 		if isCodeText {
 			src = "local_large_code"
 		}
-		return cleaned, fileVersionSignature(info), bridge.Attachment{
+		return canonicalPathKey(cleaned), fileVersionSignature(info), bridge.Attachment{
 			Filename:   base,
 			MIME:       mime,
 			DataBase64: base64.StdEncoding.EncodeToString(data),
@@ -330,6 +397,7 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 	}
 
 	seenAbs := make(map[string]bool)
+	seenContent := make(map[string]bool)
 	var attachments []bridge.Attachment
 	uploadedSigs := make(map[string]string)
 
@@ -337,19 +405,31 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 		if len(attachments) >= maxLocalAutoUploadFiles {
 			break
 		}
-		absPath, sig, att, ok := resolveAndReadLocalFile(cand, baseDirs, largeCodeMinBytes)
+		absKey, sig, att, ok := resolveAndReadLocalFile(cand, baseDirs, largeCodeMinBytes)
 		if !ok {
 			continue
 		}
-		if seenAbs[absPath] {
+		if seenAbs[absKey] {
 			continue
 		}
-		if alreadyUploaded != nil && alreadyUploaded[absPath] == sig {
+		contentKey := "sha256:" + attachmentContentHash(att)
+		if seenContent[contentKey] {
 			continue
 		}
-		seenAbs[absPath] = true
+		if alreadyUploaded != nil {
+			if prevSig, hasPath := alreadyUploaded[absKey]; hasPath {
+				if prevSig == sig {
+					continue
+				}
+			} else if alreadyUploaded[contentKey] == "uploaded" {
+				continue
+			}
+		}
+		seenAbs[absKey] = true
+		seenContent[contentKey] = true
 		attachments = append(attachments, att)
-		uploadedSigs[absPath] = sig
+		uploadedSigs[absKey] = sig
+		uploadedSigs[contentKey] = "uploaded"
 	}
 
 	return attachments, uploadedSigs
@@ -580,14 +660,51 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		}
 	}
 
-	attachments := FormatAttachmentsToBridge(activeAtts, fetchFn)
-	var uploadedSigs map[string]string
+	rawAPIAttachments := FormatAttachmentsToBridge(activeAtts, fetchFn)
+	uploadedSigs := make(map[string]string)
+
+	// If delta-context did not match (e.g. client updated a timestamp in system prompt),
+	// avoid re-uploading historical API attachments from earlier turns that are already
+	// attached in the active browser tab session.
+	var latestMsgHashes map[string]bool
+	if !isDelta && len(req.Messages) > 1 && len(rawAPIAttachments) > 0 && len(alreadyUploaded) > 0 {
+		_, latestImgs := format.ExtractMessageContent(req.Messages[len(req.Messages)-1])
+		if len(latestImgs) > 0 {
+			latestMsgHashes = make(map[string]bool, len(latestImgs))
+			for _, att := range FormatAttachmentsToBridge(latestImgs, fetchFn) {
+				latestMsgHashes[attachmentContentHash(att)] = true
+			}
+		}
+	}
+
+	var attachments []bridge.Attachment
+	for _, att := range rawAPIAttachments {
+		h := attachmentContentHash(att)
+		contentKey := "sha256:" + h
+		if !isDelta && len(req.Messages) > 1 && alreadyUploaded != nil && alreadyUploaded[contentKey] == "uploaded" {
+			if latestMsgHashes == nil || !latestMsgHashes[h] {
+				continue
+			}
+		}
+		attachments = append(attachments, att)
+		uploadedSigs[contentKey] = "uploaded"
+	}
 
 	// Local file auto-upload: for localhost requests (e.g. WorkBuddy on the same machine),
 	// automatically attach referenced local PDFs/Office docs/images AND long source code files
 	// (>= bridge_large_code_upload_bytes) directly to the Gemini tab so Gemini reads them natively.
 	if a.Cfg.BridgeAutoUploadLocalFiles && isLoopbackRequest(r) {
-		localAtts, discoveredSigs := DiscoverLocalUploadFiles(req.Messages, alreadyUploaded, a.Cfg.BridgeLargeCodeUploadBytes)
+		// Merge current-turn API attachment hashes into the skip map so a file sent BOTH via
+		// OpenAI file/image parts AND mentioned by path in text is never attached twice.
+		skipMap := make(map[string]string, len(alreadyUploaded)+len(uploadedSigs))
+		for k, v := range alreadyUploaded {
+			skipMap[k] = v
+		}
+		for k, v := range uploadedSigs {
+			skipMap[k] = v
+		}
+
+		localAtts, discoveredSigs := DiscoverLocalUploadFiles(req.Messages, skipMap, a.Cfg.BridgeLargeCodeUploadBytes)
 		if len(localAtts) > 0 {
 			var names []string
 			for _, att := range localAtts {
@@ -595,7 +712,9 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 			}
 			a.Logf("Bridge auto-attaching %d local file(s) directly to Gemini: %s", len(localAtts), strings.Join(names, ", "))
 			attachments = append(attachments, localAtts...)
-			uploadedSigs = discoveredSigs
+			for k, v := range discoveredSigs {
+				uploadedSigs[k] = v
+			}
 		}
 	}
 
@@ -610,6 +729,13 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 			a.Logf("Bridge spilled oversized prompt (%d chars) into attachment %s (%d KB)",
 				origLen, spillAtt.Filename, (spillAtt.Size+1023)/1024)
 		}
+	}
+
+	// Final hard deduplication pass so duplicate bytes/files are never dispatched in a turn
+	attachments = DeduplicateBridgeAttachments(attachments)
+
+	if len(uploadedSigs) == 0 {
+		uploadedSigs = nil
 	}
 
 	return preparedBridgeTurn{

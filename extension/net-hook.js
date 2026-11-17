@@ -36,23 +36,53 @@
     return null;
   }
 
-  function classifyUploadEndpoint(url, method) {
+  function classifyUploadEndpoint(url, method, body, contentType) {
     if (!url) return false;
     const m = method ? String(method).toUpperCase() : "POST";
     if (m !== "POST" && m !== "PUT") return false;
     const u = String(url);
 
+    // Ignore localhost bridge traffic itself
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(u)) return false;
+
     if (
       /widgetAddContextFile/i.test(u) ||
+      /batchAddContextFile/i.test(u) ||
       /[:/]addContextFile(\b|\?|$)/i.test(u) ||
       /[:/]uploadContextFile(\b|\?|$)/i.test(u) ||
+      /widgetAddSessionFile/i.test(u) ||
+      /[:/]addSessionFile(\b|\?|$)/i.test(u) ||
+      /[:/]uploadSessionFile(\b|\?|$)/i.test(u) ||
       /[:/]uploadFile(\b|\?|$)/i.test(u) ||
+      /[:/]uploadMedia(\b|\?|$)/i.test(u) ||
+      /fileUpload/i.test(u) ||
       /content-push\.clients6\.google\.com\/upload/i.test(u) ||
       /push\.clients6\.google\.com\/upload/i.test(u) ||
-      (/googleapis\.com/i.test(u) && /\/upload\//i.test(u))
+      (/googleapis\.com|google\.com/i.test(u) && /\/upload(\/|\?|$)/i.test(u))
     ) {
       return true;
     }
+
+    // Body / Content-Type inspection catches any Google file upload endpoint even if renamed
+    if (!classifyEndpoint(u, m) && (/googleapis\.com|google\.com/i.test(u) || u.startsWith("/"))) {
+      const ct = String(contentType || "").toLowerCase();
+      if (ct.includes("multipart/form-data")) return true;
+      if (body) {
+        try {
+          if (typeof FormData !== "undefined" && body instanceof FormData) return true;
+          if (typeof File !== "undefined" && body instanceof File) return true;
+          if (typeof Blob !== "undefined" && body instanceof Blob && body.size > 0) return true;
+          if (
+            typeof body === "string" &&
+            body.length > 200 &&
+            /"(fileName|file_name|fileContent|file_content|sessionFile|contextFile|addContextFile)"/i.test(body)
+          ) {
+            return true;
+          }
+        } catch (e) {}
+      }
+    }
+
     return false;
   }
 
@@ -427,10 +457,33 @@
 
   // 1. Intercept window.fetch
   const origFetch = globalScope.fetch;
+  function extractContentType(headers) {
+    if (!headers) return "";
+    try {
+      if (typeof Headers !== "undefined" && headers instanceof Headers) {
+        return headers.get("content-type") || "";
+      }
+      if (Array.isArray(headers)) {
+        for (const pair of headers) {
+          if (Array.isArray(pair) && String(pair[0] || "").toLowerCase() === "content-type") {
+            return String(pair[1] || "");
+          }
+        }
+      } else if (typeof headers === "object") {
+        for (const k of Object.keys(headers)) {
+          if (k.toLowerCase() === "content-type") return String(headers[k] || "");
+        }
+      }
+    } catch (e) {}
+    return "";
+  }
+
   if (typeof origFetch === "function") {
     globalScope.fetch = function web2apiFetch(...args) {
       let url = "";
       let method = "GET";
+      let body = null;
+      let contentType = "";
       try {
         const input = args[0];
         const init = args[1] || {};
@@ -442,10 +495,12 @@
           url = String(input || "");
         }
         method = String(init.method || (input && typeof input === "object" && input.method) || "GET").toUpperCase();
+        body = init.body !== undefined ? init.body : (input && typeof input === "object" ? input.body : null);
+        contentType = extractContentType(init.headers) || extractContentType(input && typeof input === "object" ? input.headers : null);
       } catch (e) {}
 
       const kind = classifyEndpoint(url, method);
-      const isUpload = !kind && classifyUploadEndpoint(url, method);
+      const isUpload = !kind && classifyUploadEndpoint(url, method, body, contentType);
       const promise = origFetch.apply(this, args);
 
       if (isUpload) {
@@ -531,19 +586,32 @@
   if (XHRProto && typeof XHRProto.open === "function" && typeof XHRProto.send === "function") {
     const origOpen = XHRProto.open;
     const origSend = XHRProto.send;
+    const origSetRequestHeader = XHRProto.setRequestHeader;
 
     XHRProto.open = function web2apiXhrOpen(method, url, ...rest) {
       try {
         this.__w2aMethod = String(method || "GET").toUpperCase();
         this.__w2aUrl = String(url || "");
+        this.__w2aContentType = "";
       } catch (e) {}
       return origOpen.call(this, method, url, ...rest);
     };
 
+    if (typeof origSetRequestHeader === "function") {
+      XHRProto.setRequestHeader = function web2apiXhrSetHeader(name, value) {
+        try {
+          if (String(name || "").toLowerCase() === "content-type") {
+            this.__w2aContentType = String(value || "");
+          }
+        } catch (e) {}
+        return origSetRequestHeader.call(this, name, value);
+      };
+    }
+
     XHRProto.send = function web2apiXhrSend(body) {
       try {
         const kind = classifyEndpoint(this.__w2aUrl, this.__w2aMethod);
-        const isUpload = !kind && classifyUploadEndpoint(this.__w2aUrl, this.__w2aMethod);
+        const isUpload = !kind && classifyUploadEndpoint(this.__w2aUrl, this.__w2aMethod, body, this.__w2aContentType);
         if (isUpload) {
           const uploadId = `upl_${Date.now()}_${++streamCounter}`;
           const url = this.__w2aUrl;
@@ -670,8 +738,9 @@
 
           const dt = buildDataTransferFromPayloads(activeArm.files);
           if (dt.files.length > 0) {
+            // Fire ONLY `change` on <input type="file"> (firing both `input` and `change`
+            // causes frameworks listening to both events to attach duplicate copies).
             this.files = dt.files;
-            this.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
             this.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
             postToBridge("upload_injected", activeArm.armId, "", {
               count: dt.files.length,
