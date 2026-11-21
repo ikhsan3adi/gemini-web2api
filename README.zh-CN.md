@@ -1,4 +1,4 @@
-<!-- markdown-translator:62dba9eec309a74d88006d57d713a432a95bf4677b56668264e4322808769359 -->
+<!-- markdown-translator:4eedbaa298cddfe0db54ba3b3ca671ad55abe9e7ffae033c07b6765611423796 -->
 # Gemini-web2api
 
 <p align="center">
@@ -18,7 +18,7 @@
 * **多式联运（视觉）**：完全支持发送图像（`image_url`/base64) 到 Gemini，使用 Scotty 可恢复上传协议本机内置图像压缩。
 * **TLS 模拟**：内置支持通过模仿 Chrome/Edge TLS 指纹来绕过 Cloudflare/WAF`tls-client`🔥.
 * **工具调用**：全函数调用支持（OpenAI格式）。
-* **多种型号**：Flash (3.6)、Extend Thinking（20k+ 字符输出）、Pro、Auto、Lite。
+* **多种型号**：Gemini 4 Carbon、Neon、Argon 和 Hydrogen，以及旧版 Flash、Thinking、Pro、Auto 和 Lite 型号。您帐户名册上的可用模型会在启动时自动注册。
 * **思考深度**：可通过调整推理`@think=N`后缀（0=最深，4=最浅）。
 * **网页搜索**：内置互联网访问（Gemini 的本机搜索）。
 * **高性能**：纯 Go 静态二进制文件，具有高并发 SSE 流吞吐量和最小的内存占用。
@@ -47,7 +47,7 @@ chmod +x gemini-web2api
 
 ### 2.通过Go工具链安装
 
-如果您的系统上安装了 Go 1.22+：
+如果您的系统上安装了 Go 1.26+：
 
 ```bash
 go install github.com/ikhsan3adi/gemini-web2api@latest
@@ -61,7 +61,7 @@ gemini-web2api --port 8081
 
 ### 3. 从源代码构建
 
-先决条件：Go 1.22+
+先决条件：Go 1.26+
 
 ```bash
 git clone https://github.com/ikhsan3adi/gemini-web2api.git
@@ -113,17 +113,17 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
-> **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
+> **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求引起的。
 
 ## 客户端配置
 
 ### Cherry Studio / ChatBox / 任何 OpenAI 客户端
 
-|领域 |价值|
+|领域|价值|
 | -------- | -------------------------------------------------------------------------------- |
 |基本网址 |`http://localhost:8081/v1`|
 | API 密钥 |任何`api_keys`价值来自`config.json`;如果没有配置的话，什么都可以|
-|型号|`gemini-3.5-flash-thinking`|
+|型号|`gemini-4-hydrogen`|
 
 ### 卷曲
 
@@ -133,13 +133,13 @@ docker compose up -d
 curl http://localhost:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-your-key" \
-  -d '{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"gemini-4-hydrogen","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 #### PowerShell（Windows）
 
 ```powershell
-curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-key" -d "{\"model\":\"gemini-3.5-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}"
+curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer sk-your-key" -d "{\"model\":\"gemini-4-hydrogen\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}"
 ```
 
 > 注意：在 Windows PowerShell 上，使用`curl.exe`和`--%`因此 PowerShell 不会重新解释 JSON 引用或curl 选项。
@@ -150,7 +150,7 @@ curl.exe --% http://127.0.0.1:8081/v1/chat/completions -H "Content-Type: applica
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8081/v1", api_key="sk-your-key")
 resp = client.chat.completions.create(
-    model="gemini-3.5-flash-thinking",
+    model="gemini-4-hydrogen",
     messages=[{"role": "user", "content": "Explain quantum computing"}]
 )
 print(resp.choices[0].message.content)
@@ -172,19 +172,31 @@ gemini
 
 ## 可用型号
 
-|型号|描述 |输出|
-| -------------------------------- | ------------------------------------------------------------------ | --------------- |
-|`gemini-4-argon`|复杂任务的前沿模型（需要 Pro）|**~20k+ 字符**|
-|`argon`,`gemini-4`| Gemini-4-argon 的别名 |**~20k+ 字符**|
-|`gemini-3.8-flash`|最新全能机型（Gemini 3.8 Flash）|约 12k 个字符 |
-|`gemini-3.7-flash`|全能机型（Gemini 3.7 Flash）|约 12k 个字符 |
-|`gemini-3.6-flash`|全能机型（Gemini 3.6 Flash）|约 12k 个字符 |
-|`gemini-3.5-flash`| gemini-3.6-flash 的别名 |约 12k 个字符 |
-|`gemini-3.5-flash-thinking`|延伸思维，最长产出 |**约 20,000 个字符**|
-|`gemini-3.5-flash-thinking-lite`|适应性思维深度|约 15,000 个字符 |
-|`gemini-3.1-pro`|高级数学和代码（需要 Pro cookie）|约 12k 个字符 |
-|`gemini-auto`|汽车选型|变化 |
-|`gemini-flash-lite`|最快的答案，轻量级 | 〜10k 个字符 |
+从最强大/最新的前沿模型到轻量级和遗留别名。
+
+|型号|等级 |描述 |输出|
+| -------------------------------- | ----------- | ---------------------------------------------------------- | ---------------- |
+|`gemini-4-carbon`|超|长视野主体推理（前沿）|**~20k+ 字符**|
+|`carbon`|超| gemini-4-carbon 的别名 |**~20k+ 字符**|
+|`gemini-4-neon`|专业/超|前沿推理与复杂编码 |**~20k+ 字符**|
+|`neon`|专业/超| Gemini-4-neon 的别名 |**~20k+ 字符**|
+|`gemini-4-argon`|专业|复杂任务的高效前沿推理 |**~20k+ 字符**|
+|`argon`,`gemini-4`|专业| Gemini-4-argon 的别名 |**~20k+ 字符**|
+|`gemini-4-hydrogen`|免费|日常编码和代理工作流程 |约 12k 个字符 |
+|`hydrogen`|免费| Gemini-4-氢的别名 |约 12k 个字符 |
+|`gemini-3.8-flash`|免费|传统的日常老虎机（现在提供氢）|约 12k 个字符 |
+|`gemini-3.7-flash`|免费|传统全能模型 |约 12k 个字符 |
+|`gemini-3.6-flash`|免费|默认后备模型|约 12k 个字符 |
+|`gemini-3.5-flash`|免费| gemini-3.6-flash 的别名 |约 12k 个字符 |
+|`gemini-3.1-pro`|专业| Legacy Pro 老虎机（现在在 Pro 上提供 Neon）|约 12k 个字符 |
+|`gemini-3.5-flash-thinking`|免费|延伸思维，最长产出 |**约 20,000 个字符**|
+|`gemini-3.5-flash-thinking-lite`|免费|适应性思维深度 |约 15,000 个字符 |
+|`gemini-auto`|免费|汽车选型|变化 |
+|`gemini-flash-lite`|免费|最快的答案，轻量级 | 〜10k 个字符 |
+
+启动时从您的帐户名册中发现的模型（例如上面未列出的新 Gemini 变体）会自动注册并显示在`/v1/models`;看[动态模型注册](#dynamic-model-registration).
+
+Gemini 4 模型通过网络应用程序的层级槽进行路由：Hydrogen 映射到日常/快速槽，Neon 映射到 Pro 槽，Carbon 映射到顶级槽。在没有所需订阅的帐户上，上游可能会将请求路由到该插槽上可用的下一个模型（例如，Carbon 票证在非 Ultra 帐户上解析为 Argon）。
 
 ### 思考深度
 
@@ -200,14 +212,24 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 每个 API 响应（JSON 和流式 SSE）都包含指示实际模型路由的 HTTP 响应标头：
 
-* `X-Resolved-Model`：实际路由到的后端模型标识符（例如`gemini-4-argon`).
+* `X-Resolved-Model`：实际路由到的后端模型标识符（例如`gemini-4-neon`).
 * `X-Model-Fallback: true`：每当请求未映射的模型并回退到默认模型时都包含在内。
 
 ## 高级功能（独家）
 
 ### 1.动态模型发现和上游路由头
 
-当使用帐户 cookie 进行身份验证时，代理会动态查询 Gemini 的`otAQ7b`启动期间进行 RPC 以发现可用模型和帐户层容量。它附加所需的上游路由标头（`x-goog-ext-525001261-jspb`）匹配 Web 应用程序行为，允许 Gemini 4 Argon 等模型正确路由。
+当使用帐户 cookie 进行身份验证时，代理会动态查询 Gemini 的`otAQ7b`启动期间进行 RPC 以发现可用模型和帐户层容量。它附加所需的上游路由标头（`x-goog-ext-525001261-jspb`) 匹配 Web 应用程序行为，允许 Gemini 4 系列和旧层插槽正确路由。
+
+#### 动态模型注册
+
+发现的模型也会自动注册为从其上游标签派生的 API 模型名称：名册条目显示为`4 Hydrogen`变成`gemini-4-hydrogen`（也可称为`4-hydrogen`）。这些名字列出来了`/v1/models`和`/v1beta/models`并且无需更改代码即可在请求中使用，因此新推出的变体一旦出现在您的帐户名册中即可发挥作用。
+
+* 静态条目（上表）始终优先于已发现的同名条目。
+* 如果静态模型的上游路由票证发生轮换，则具有相同显示标签的名册条目将自动用于路由标头。
+* Discovery 需要 cookie；匿名设置只能看到静态模型列表。
+* `@think=N`适用于已发现的模型，但只有标准思维深度映射到上游标头；更高层次，例如`xhigh`不是合成的。
+* 请求既不是静态的也不存在于名册中的模型会回退到默认模型：`X-Model-Fallback: true`.
 
 ### 2. 视觉/多模式上传
 
@@ -225,9 +247,9 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 或者在`config.json`:`"impersonate": "chrome_120"`。支持的配置文件包括`chrome_112`到`chrome_130`,`edge`， 和`safari`.
 
-## 可选：Pro 和 Argon 的 Cookie
+## 可选：Pro / Ultra 型号的 Cookie
 
-匿名访问适用于 Flash 模型，但是`gemini-4-argon`和`gemini-3.1-pro`需要经过身份验证**谷歌人工智能专业版/高级版**帐户会话。如果没有身份验证，上游会将请求路由到 Flash。
+匿名访问涵盖免费层插槽（`gemini-4-hydrogen`和旧版 Flash/Lite），目前解析为 Gemini 4 Hydrogen。`gemini-4-argon`需要**谷歌人工智能专业版**,`gemini-4-neon`需要**专业/超**， 和`gemini-4-carbon`需要**极端主义者**。如果没有授权 cookie，请求仍然会成功，但每个层槽都会解析为帐户上可用的最佳模型。
 
 ```bash
 ./gemini-web2api --cookie-file gemini-auth.json
@@ -235,7 +257,7 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 ### 如何获取cookies
 
-1. 打开 Chrome，转到[gemini.google.com](https://gemini.google.com)并使用 a 登录**双子座高级版**谷歌帐户
+1. 打开 Chrome，转到[gemini.google.com](https://gemini.google.com)并登录（**人工智能专业版/超级版**仅 Pro/Ultra-tier 型号需要订阅）
 2. 打开 DevTools (F12) → 应用程序 → Cookies →`https://gemini.google.com`
 3. 复制这些 cookie 值：`SID`,`HSID`,`SSID`,`APISID`,`SAPISID`,`__Secure-1PSID`
 4. 创造`cookie.txt`以这种格式：
@@ -275,7 +297,7 @@ https://gemini.google.com/u/1/app/...
 
 如果经过身份验证的请求返回 HTTP 400`xsrf`错误，刷新Gemini Web，更新`xsrf_token`，并确保`auth_user`匹配`/u/<index>/`浏览器 URL 的一部分。
 
-专业路由需要**双子座高级版**（付费订阅）。免费的 Google 帐户 cookie 将进行身份验证，但会默默地退回到 Flash。
+型号可用性取决于您的帐户级别。免费帐户 cookie 通常会进行身份验证，但 Pro/Ultra 老虎机解析为免费层模型（例如，日常老虎机提供 Gemini 4 Hydrogen）。
 
 ## 配置
 
@@ -288,7 +310,7 @@ https://gemini.google.com/u/1/app/...
   "retry_attempts": 3,
   "retry_delay_sec": 2,
   "request_timeout_sec": 180,
-  "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
+  "gemini_bl": "boq_gemini-web-uiserver_20261120.09_p0",
   "auth_user": null,
   "xsrf_token": null,
   "api_keys": ["sk-your-key"],
@@ -339,7 +361,7 @@ gemini-web2api.exe
 
 ## 局限性
 
-* **不是真正的 Pro/Ultra**：没有付费订阅 cookie，`gemini-3.1-pro`路由到相同的 Flash 模型。 “Pro”标签是 UI 首选项，而不是后端模型开关。
+* **层相关路由**：Gemini Web 应用程序通过层槽而不是直接模型切换来公开模型。如果没有授权 cookie，Pro/Ultra 型号名称将解析为同一插槽上可用的最佳型号。
 * **仅单圈**：每个请求都是一个独立的对话。通过在提示中包含先前的消息来模拟多轮上下文。
 * **速率限制**：Google 可能会限制高频请求。服务器会自动重试，但持续的大量使用可能会被阻止。
 
