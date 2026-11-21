@@ -16,6 +16,9 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	for k := range models.MODELS {
 		modelNames = append(modelNames, k)
 	}
+	for _, dm := range a.dynamicModels() {
+		modelNames = append(modelNames, dm.Name)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
@@ -35,6 +38,15 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 			"description": m.Desc,
 		})
 	}
+	for _, dm := range a.dynamicModels() {
+		data = append(data, map[string]any{
+			"id":          dm.Name,
+			"object":      "model",
+			"created":     1700000000,
+			"owned_by":    "google",
+			"description": dm.Desc,
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
@@ -49,6 +61,14 @@ func (a *App) handleGoogleModels(w http.ResponseWriter, r *http.Request) {
 			"name":                       "models/" + name,
 			"displayName":                name,
 			"description":                m.Desc,
+			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent"},
+		})
+	}
+	for _, dm := range a.dynamicModels() {
+		modelList = append(modelList, map[string]any{
+			"name":                       "models/" + dm.Name,
+			"displayName":                dm.Name,
+			"description":                dm.Desc,
 			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent"},
 		})
 	}

@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
 const (
@@ -280,16 +282,27 @@ func (c *Client) resolveModelHeader(opt ModelOptions, reqUUID string) (string, i
 	}
 
 	c.modelsMu.RLock()
-	models := c.discovered
+	roster := c.discovered
 	capVal := c.accountCap
 	capFld := c.accountCapFld
 	c.modelsMu.RUnlock()
 
 	var target *DiscoveredModel
-	for i := range models {
-		if models[i].ID == opt.ModelHeader {
-			target = &models[i]
+	for i := range roster {
+		if roster[i].ID == opt.ModelHeader {
+			target = &roster[i]
 			break
+		}
+	}
+	if target == nil && opt.ModelName != "" {
+		// The upstream ticket for this model may have rotated; fall back to the
+		// roster entry whose display label maps to the same model name.
+		for i := range roster {
+			name, ok := models.DynamicNameFromDisplay(roster[i].Display)
+			if ok && name == opt.ModelName {
+				target = &roster[i]
+				break
+			}
 		}
 	}
 
