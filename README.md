@@ -177,6 +177,10 @@ Supports Google native API endpoints:
 | `argon`, `gemini-4`              | Aliases for gemini-4-argon                   | **~20k+ chars** |
 | `gemini-4-hydrogen`              | Everyday coding & agentic work (free tier)   | ~12k chars      |
 | `hydrogen`                       | Alias for gemini-4-hydrogen                  | ~12k chars      |
+| `gemini-4-neon`                  | Deeper analysis & coding (Pro/Ultra)         | ~12k chars      |
+| `neon`                           | Alias for gemini-4-neon                      | ~12k chars      |
+| `gemini-4-carbon`                | Long-horizon agentic reasoning (Ultra)       | **~20k+ chars** |
+| `carbon`                         | Alias for gemini-4-carbon                    | **~20k+ chars** |
 | `gemini-3.8-flash`               | Latest all-around model (Gemini 3.8 Flash)   | ~12k chars      |
 | `gemini-3.7-flash`               | All-around model (Gemini 3.7 Flash)          | ~12k chars      |
 | `gemini-3.6-flash`               | All-around model (Gemini 3.6 Flash)          | ~12k chars      |
@@ -187,7 +191,9 @@ Supports Google native API endpoints:
 | `gemini-auto`                    | Auto model selection                         | varies          |
 | `gemini-flash-lite`              | Fastest answers, lightweight                 | ~10k chars      |
 
-Models discovered from your account roster at startup (for example `gemini-4-carbon` on Ultra or `gemini-4-neon` on Pro/Ultra) are registered automatically and appear in `/v1/models`; see [Dynamic Model Registration](#dynamic-model-registration).
+Models discovered from your account roster at startup (for example new Gemini variants not listed above) are registered automatically and appear in `/v1/models`; see [Dynamic Model Registration](#dynamic-model-registration).
+
+Gemini 4 models are routed through the web app's tier slots: Hydrogen maps to the everyday/fast slot, Neon to the Pro slot, and Carbon to the top-tier slot. On accounts without the required subscription the upstream may route a request to the next model available on that slot (for example the Carbon ticket resolves to Argon on non-Ultra accounts).
 
 ### Thinking Depth
 

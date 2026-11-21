@@ -238,9 +238,9 @@ func TestModelHeaders(t *testing.T) {
 func TestDynamicModelsFrom(t *testing.T) {
 	discovered := []gemini.DiscoveredModel{
 		{ID: "56fdd199312815e2", Display: "4 Hydrogen", Desc: "", Number: 1},
-		{ID: "carbon-ticket", Display: "4 Carbon", Desc: "hardest tasks", Number: 8},
-		{ID: "neon-ticket", Display: "4 Neon", Desc: "", Number: 8},
-		{ID: "neon-duplicate", Display: "4 Neon", Desc: "", Number: 8},
+		{ID: "krypton-ticket", Display: "4 Krypton", Desc: "rare gas", Number: 8},
+		{ID: "xenon-ticket", Display: "4 Xenon", Desc: "", Number: 8},
+		{ID: "xenon-duplicate", Display: "4 Xenon", Desc: "", Number: 8},
 		{ID: "unknown", Display: "weird label", Desc: "", Number: 1},
 	}
 
@@ -254,17 +254,17 @@ func TestDynamicModelsFrom(t *testing.T) {
 	if _, ok := byName["gemini-4-hydrogen"]; ok {
 		t.Error("static Hydrogen entry must take precedence over discovered model")
 	}
-	if _, ok := byName["gemini-4-carbon"]; !ok {
-		t.Fatal("expected gemini-4-carbon from discovery")
+	if _, ok := byName["gemini-4-krypton"]; !ok {
+		t.Fatal("expected gemini-4-krypton from discovery")
 	}
-	if byName["gemini-4-carbon"].Ticket != "carbon-ticket" || byName["gemini-4-carbon"].Mode != 8 {
-		t.Errorf("unexpected carbon mapping: %+v", byName["gemini-4-carbon"])
+	if byName["gemini-4-krypton"].Ticket != "krypton-ticket" || byName["gemini-4-krypton"].Mode != 8 {
+		t.Errorf("unexpected krypton mapping: %+v", byName["gemini-4-krypton"])
 	}
-	if byName["gemini-4-carbon"].Desc != "hardest tasks" {
-		t.Errorf("expected discovery description, got %q", byName["gemini-4-carbon"].Desc)
+	if byName["gemini-4-krypton"].Desc != "rare gas" {
+		t.Errorf("expected discovery description, got %q", byName["gemini-4-krypton"].Desc)
 	}
-	if byName["gemini-4-neon"].Desc != "4 Neon" {
-		t.Errorf("expected display fallback description, got %q", byName["gemini-4-neon"].Desc)
+	if byName["gemini-4-xenon"].Desc != "4 Xenon" {
+		t.Errorf("expected display fallback description, got %q", byName["gemini-4-xenon"].Desc)
 	}
 	if len(got) != 2 {
 		t.Errorf("expected 2 dynamic models after dedupe/filter, got %d: %+v", len(got), got)

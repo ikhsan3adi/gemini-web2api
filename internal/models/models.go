@@ -59,6 +59,30 @@ var MODELS = map[string]Model{
 		Header: "56fdd199312815e2",
 		Desc:   "Alias for gemini-4-hydrogen",
 	},
+	"gemini-4-carbon": {
+		Mode:   8,
+		Think:  4,
+		Header: "f44d2958d1f0189a",
+		Desc:   "Long-horizon agentic reasoning (Gemini 4 Carbon, Ultra accounts)",
+	},
+	"carbon": {
+		Mode:   8,
+		Think:  4,
+		Header: "f44d2958d1f0189a",
+		Desc:   "Alias for gemini-4-carbon",
+	},
+	"gemini-4-neon": {
+		Mode:   3,
+		Think:  4,
+		Header: "e6fa609c3fa255c0",
+		Desc:   "Deeper analysis and coding (Gemini 4 Neon, Pro/Ultra accounts)",
+	},
+	"neon": {
+		Mode:   3,
+		Think:  4,
+		Header: "e6fa609c3fa255c0",
+		Desc:   "Alias for gemini-4-neon",
+	},
 	"gemini-3.8-flash": {
 		Mode:  1,
 		Think: 4,
