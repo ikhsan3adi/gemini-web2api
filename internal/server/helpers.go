@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
@@ -16,6 +17,47 @@ func setModelHeaders(w http.ResponseWriter, resolved models.Resolved) {
 	if resolved.Fallback {
 		w.Header().Set("X-Model-Fallback", "true")
 	}
+}
+
+// resolveModel resolves a requested model name against the static registry and
+// the models discovered from the authenticated account roster.
+func (a *App) resolveModel(modelName string) (models.Resolved, error) {
+	return models.Resolve(modelName, a.Cfg.DefaultModel, a.dynamicModels()...)
+}
+
+// dynamicModels returns the models discovered from the account roster that are
+// not already covered by the static registry. Static entries always win.
+func (a *App) dynamicModels() []models.DynamicModel {
+	if a.Gem == nil {
+		return nil
+	}
+	return dynamicModelsFrom(a.Gem.DiscoveredModels())
+}
+
+func dynamicModelsFrom(discovered []gemini.DiscoveredModel) []models.DynamicModel {
+	out := make([]models.DynamicModel, 0, len(discovered))
+	seen := make(map[string]bool, len(discovered))
+	for _, dm := range discovered {
+		name, ok := models.DynamicNameFromDisplay(dm.Display)
+		if !ok {
+			continue
+		}
+		if _, exists := models.MODELS[name]; exists || seen[name] {
+			continue
+		}
+		seen[name] = true
+		desc := dm.Desc
+		if desc == "" {
+			desc = dm.Display
+		}
+		out = append(out, models.DynamicModel{
+			Name:   name,
+			Ticket: dm.ID,
+			Desc:   desc,
+			Mode:   dm.Number,
+		})
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

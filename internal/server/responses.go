@@ -31,7 +31,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		modelStr = a.Cfg.DefaultModel
 	}
 
-	resolved, err := models.Resolve(modelStr, a.Cfg.DefaultModel)
+	resolved, err := a.resolveModel(modelStr)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return

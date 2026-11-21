@@ -17,7 +17,7 @@ This is a complete Go rewrite of the original [Python gemini-web2api](https://gi
 - **Multimodal (Vision)**: Fully supports sending images (`image_url` / base64) to Gemini using Scotty Resumable Upload protocol natively with built-in image compression.
 - **TLS Impersonation**: Built-in support to bypass Cloudflare/WAF by mimicking Chrome/Edge TLS fingerprints using `tls-client` 🔥.
 - **Tool Calling**: Full function calling support (OpenAI format).
-- **Multiple Models**: Flash (3.6), Extended Thinking (20k+ char output), Pro, Auto, Lite.
+- **Multiple Models**: Flash (3.6), Gemini 4 Hydrogen, Extended Thinking (20k+ char output), Pro, Auto, Lite. Models available on your account roster are auto-registered at startup.
 - **Thinking Depth**: Adjustable reasoning via `@think=N` suffix (0=deepest, 4=shallowest).
 - **Web Search**: Built-in internet access (Gemini's native search).
 - **High Performance**: Pure Go static binary with high concurrent SSE streaming throughput and minimal memory footprint.
@@ -175,6 +175,8 @@ Supports Google native API endpoints:
 | -------------------------------- | -------------------------------------------- | --------------- |
 | `gemini-4-argon`                 | Frontier model for complex tasks (needs Pro) | **~20k+ chars** |
 | `argon`, `gemini-4`              | Aliases for gemini-4-argon                   | **~20k+ chars** |
+| `gemini-4-hydrogen`              | Everyday coding & agentic work (free tier)   | ~12k chars      |
+| `hydrogen`                       | Alias for gemini-4-hydrogen                  | ~12k chars      |
 | `gemini-3.8-flash`               | Latest all-around model (Gemini 3.8 Flash)   | ~12k chars      |
 | `gemini-3.7-flash`               | All-around model (Gemini 3.7 Flash)          | ~12k chars      |
 | `gemini-3.6-flash`               | All-around model (Gemini 3.6 Flash)          | ~12k chars      |
@@ -184,6 +186,8 @@ Supports Google native API endpoints:
 | `gemini-3.1-pro`                 | Advanced math & code (needs Pro cookie)      | ~12k chars      |
 | `gemini-auto`                    | Auto model selection                         | varies          |
 | `gemini-flash-lite`              | Fastest answers, lightweight                 | ~10k chars      |
+
+Models discovered from your account roster at startup (for example `gemini-4-carbon` on Ultra or `gemini-4-neon` on Pro/Ultra) are registered automatically and appear in `/v1/models`; see [Dynamic Model Registration](#dynamic-model-registration).
 
 ### Thinking Depth
 
@@ -207,6 +211,16 @@ Every API response (both JSON and streaming SSE) includes HTTP response headers 
 
 When authenticated with account cookies, the proxy dynamically queries Gemini's `otAQ7b` RPC during startup to discover available models and account tier capacity. It attaches the required upstream routing headers (`x-goog-ext-525001261-jspb`) matching web application behavior, allowing models like Gemini 4 Argon to route properly.
 
+#### Dynamic Model Registration
+
+Discovered models are also registered automatically as API model names derived from their upstream label: a roster entry displayed as `4 Hydrogen` becomes `gemini-4-hydrogen` (also callable as `4-hydrogen`). These names are listed by `/v1/models` and `/v1beta/models` and are usable in requests without code changes, so newly rolled-out variants work as soon as they appear in your account roster.
+
+- Static entries (the table above) always take precedence over discovered entries with the same name.
+- If the upstream routing ticket for a static model rotates, the roster entry with the same display label is used for the routing header automatically.
+- Discovery requires cookies; anonymous setups only see the static model list.
+- `@think=N` works on discovered models, but only the standard thinking depths map onto the upstream header; higher tiers such as `xhigh` are not synthesized.
+- Requesting a model that is neither static nor present in the roster falls back to the default model with `X-Model-Fallback: true`.
+
 ### 2. Vision / Multimodal Uploads
 
 Unlike the Python version which ignores images, this Go port actively intercepts `image_url` payloads (both base64 encoded and external HTTP URLs).
@@ -225,7 +239,7 @@ Or in `config.json`: `"impersonate": "chrome_120"`. Supported profiles include `
 
 ## Optional: Cookie for Pro and Argon
 
-Anonymous access works for Flash models, but `gemini-4-argon` and `gemini-3.1-pro` require an authenticated **Google AI Pro / Advanced** account session. Without authentication, upstream routes requests to Flash.
+Anonymous access works for Flash and `gemini-4-hydrogen`, but `gemini-4-argon` and `gemini-3.1-pro` require an authenticated **Google AI Pro / Advanced** account session. Without authentication, upstream routes requests to the account's default tier. Gemini 4 Carbon is only available to Ultra accounts, and Neon to Pro / Ultra accounts; those names appear automatically only when your roster includes them.
 
 ```bash
 ./gemini-web2api --cookie-file gemini-auth.json

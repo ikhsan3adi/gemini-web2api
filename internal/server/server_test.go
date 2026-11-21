@@ -9,6 +9,7 @@ import (
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -231,5 +232,41 @@ func TestModelHeaders(t *testing.T) {
 	}
 	if got := rec2.Header().Get("X-Model-Fallback"); got != "true" {
 		t.Errorf("Expected X-Model-Fallback=true for unknown model, got %q", got)
+	}
+}
+
+func TestDynamicModelsFrom(t *testing.T) {
+	discovered := []gemini.DiscoveredModel{
+		{ID: "56fdd199312815e2", Display: "4 Hydrogen", Desc: "", Number: 1},
+		{ID: "carbon-ticket", Display: "4 Carbon", Desc: "hardest tasks", Number: 8},
+		{ID: "neon-ticket", Display: "4 Neon", Desc: "", Number: 8},
+		{ID: "neon-duplicate", Display: "4 Neon", Desc: "", Number: 8},
+		{ID: "unknown", Display: "weird label", Desc: "", Number: 1},
+	}
+
+	got := dynamicModelsFrom(discovered)
+
+	byName := make(map[string]models.DynamicModel, len(got))
+	for _, dm := range got {
+		byName[dm.Name] = dm
+	}
+
+	if _, ok := byName["gemini-4-hydrogen"]; ok {
+		t.Error("static Hydrogen entry must take precedence over discovered model")
+	}
+	if _, ok := byName["gemini-4-carbon"]; !ok {
+		t.Fatal("expected gemini-4-carbon from discovery")
+	}
+	if byName["gemini-4-carbon"].Ticket != "carbon-ticket" || byName["gemini-4-carbon"].Mode != 8 {
+		t.Errorf("unexpected carbon mapping: %+v", byName["gemini-4-carbon"])
+	}
+	if byName["gemini-4-carbon"].Desc != "hardest tasks" {
+		t.Errorf("expected discovery description, got %q", byName["gemini-4-carbon"].Desc)
+	}
+	if byName["gemini-4-neon"].Desc != "4 Neon" {
+		t.Errorf("expected display fallback description, got %q", byName["gemini-4-neon"].Desc)
+	}
+	if len(got) != 2 {
+		t.Errorf("expected 2 dynamic models after dedupe/filter, got %d: %+v", len(got), got)
 	}
 }

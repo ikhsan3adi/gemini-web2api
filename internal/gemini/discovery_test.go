@@ -166,3 +166,43 @@ func TestResolveModelHeader(t *testing.T) {
 		t.Errorf("expected thinking tail 2 in header, got %s", hdrThinkingEnabled)
 	}
 }
+
+func TestResolveModelHeaderTicketRotation(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookiePath := filepath.Join(tmpDir, "gemini-auth.json")
+	if err := os.WriteFile(cookiePath, []byte(`{"cookie":"dummy_cookie=xyz; SAPISID=abc123"}`), 0600); err != nil {
+		t.Fatalf("failed to create temp cookie file: %v", err)
+	}
+
+	client := NewClient(config.Default())
+	client.Cookies = NewCookieCache(cookiePath)
+	client.accountCap = 2
+	client.accountCapFld = 12
+	client.discovered = []DiscoveredModel{
+		{
+			ID:          "rotated-hydrogen-ticket",
+			Category:    "Hydrogen",
+			Display:     "4 Hydrogen",
+			Number:      1,
+			Capacity:    4,
+			CapacityFld: 12,
+		},
+	}
+
+	opt := ModelOptions{
+		ModelName:   "gemini-4-hydrogen",
+		ModelID:     1,
+		ThinkMode:   4,
+		ModelHeader: "56fdd199312815e2",
+	}
+	hdr, effMode := client.resolveModelHeader(opt, "TEST-UUID")
+	if effMode != 1 {
+		t.Errorf("effMode = %d, want 1", effMode)
+	}
+	if !strings.Contains(hdr, "rotated-hydrogen-ticket") {
+		t.Errorf("expected roster ticket in header after rotation, got %s", hdr)
+	}
+	if !strings.Contains(hdr, "4") {
+		t.Errorf("expected roster capacity 4 in header, got %s", hdr)
+	}
+}
