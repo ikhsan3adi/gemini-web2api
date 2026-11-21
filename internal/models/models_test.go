@@ -64,6 +64,46 @@ func TestResolve(t *testing.T) {
 			wantErr:      false,
 		},
 		{
+			input:        "gemini-4-carbon",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4-carbon",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "f44d2958d1f0189a",
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "carbon",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "carbon",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "f44d2958d1f0189a",
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "gemini-4-neon",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4-neon",
+			wantMode:     3,
+			wantThink:    4,
+			wantHeader:   "e6fa609c3fa255c0",
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
+			input:        "neon@think=2",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "neon",
+			wantMode:     3,
+			wantThink:    2,
+			wantHeader:   "e6fa609c3fa255c0",
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
 			input:        "argon@think=0",
 			defaultName:  "gemini-3.6-flash",
 			wantName:     "argon",
@@ -147,16 +187,16 @@ func TestResolveEnhanced(t *testing.T) {
 
 func TestResolveDynamic(t *testing.T) {
 	dynamic := []DynamicModel{
-		{Name: "gemini-4-carbon", Ticket: "carbon-ticket", Desc: "4 Carbon", Mode: 8},
-		{Name: "gemini-4-neon", Ticket: "neon-ticket", Desc: "4 Neon", Mode: 8},
+		{Name: "gemini-4-krypton", Ticket: "krypton-ticket", Desc: "4 Krypton", Mode: 8},
+		{Name: "gemini-4-xenon", Ticket: "xenon-ticket", Desc: "4 Xenon", Mode: 8},
 	}
 
 	t.Run("dynamic exact name", func(t *testing.T) {
-		res, err := Resolve("gemini-4-carbon", "gemini-3.6-flash", dynamic...)
+		res, err := Resolve("gemini-4-krypton", "gemini-3.6-flash", dynamic...)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
-		if res.Name != "gemini-4-carbon" || res.Mode != 8 || res.Header != "carbon-ticket" {
+		if res.Name != "gemini-4-krypton" || res.Mode != 8 || res.Header != "krypton-ticket" {
 			t.Errorf("Unexpected resolved model: %+v", res)
 		}
 		if res.Fallback {
@@ -165,17 +205,17 @@ func TestResolveDynamic(t *testing.T) {
 	})
 
 	t.Run("dynamic alias without prefix", func(t *testing.T) {
-		res, err := Resolve("4-neon", "gemini-3.6-flash", dynamic...)
+		res, err := Resolve("4-xenon", "gemini-3.6-flash", dynamic...)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
-		if res.Name != "gemini-4-neon" || res.Header != "neon-ticket" {
+		if res.Name != "gemini-4-xenon" || res.Header != "xenon-ticket" {
 			t.Errorf("Unexpected resolved model: %+v", res)
 		}
 	})
 
 	t.Run("dynamic think override", func(t *testing.T) {
-		res, err := Resolve("gemini-4-carbon@think=2", "gemini-3.6-flash", dynamic...)
+		res, err := Resolve("gemini-4-krypton@think=2", "gemini-3.6-flash", dynamic...)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -186,14 +226,14 @@ func TestResolveDynamic(t *testing.T) {
 
 	t.Run("static takes precedence over dynamic", func(t *testing.T) {
 		override := []DynamicModel{
-			{Name: "gemini-4-hydrogen", Ticket: "different-ticket", Mode: 99},
+			{Name: "gemini-4-carbon", Ticket: "different-ticket", Mode: 99},
 		}
-		res, err := Resolve("gemini-4-hydrogen", "gemini-3.6-flash", override...)
+		res, err := Resolve("gemini-4-carbon", "gemini-3.6-flash", override...)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
-		if res.Header != "56fdd199312815e2" || res.Mode != 1 {
-			t.Errorf("Expected static Hydrogen entry, got %+v", res)
+		if res.Header != "f44d2958d1f0189a" || res.Mode != 8 {
+			t.Errorf("Expected static Carbon entry, got %+v", res)
 		}
 	})
 
