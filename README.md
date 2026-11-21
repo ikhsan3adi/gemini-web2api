@@ -4,7 +4,7 @@
   <img src="https://raw.githubusercontent.com/Sophomoresty/gemini-web2api/main/logo.png" width="200" alt="gemini-web2api logo">
 </p>
 
-[English](README.md) | [中文文档](README.zh-CN.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [العربية](README.ar.md) | [Español](README.es.md) | [Português](README.pt.md) | [Русский](README.ru.md) | [Tiếng Việt](README.vi.md) | [हिन्दी](README.hi.md)
 
 High-performance Go proxy converting Google Gemini's web interface into an OpenAI-compatible API. Zero cost, cross-platform, single static binary.
 

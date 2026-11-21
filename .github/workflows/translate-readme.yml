@@ -15,11 +15,19 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 20.x
+          node-version: 24.x
 
       - name: Adding README translations
         uses: ikhsan3adi/markdown-translator@v3
         with:
-          LANG: zh-CN
+          LANG: |-
+            zh-CN
+            zh-TW
+            ar
+            es
+            pt
+            ru
+            vi
+            hi
           FILES: |-
             README.md
