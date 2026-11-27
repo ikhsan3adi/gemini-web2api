@@ -6,6 +6,8 @@
 
 [English](README.md) | [中文文档](README.zh-CN.md)
 
+[![CI](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml)
+
 High-performance Go proxy converting Google Gemini's web interface into an OpenAI-compatible API. Zero cost, cross-platform, single static binary.
 
 This is a complete Go rewrite of the original [Python gemini-web2api](https://github.com/Sophomoresty/gemini-web2api). It features massive concurrency throughput, minimal memory footprint, and enhanced capabilities such as **TLS Impersonation** for WAF bypass.
