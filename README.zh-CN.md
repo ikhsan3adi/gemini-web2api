@@ -1,4 +1,4 @@
-<!-- markdown-translator:4eedbaa298cddfe0db54ba3b3ca671ad55abe9e7ffae033c07b6765611423796 -->
+<!-- markdown-translator:0aa036af3f1a26e9943f61a84a87c44de7cb165319c9ade840c5822c7e401dc3 -->
 # Gemini-web2api
 
 <p align="center">
@@ -6,6 +6,8 @@
 </p>
 
 [英语](README.md)|[中文文档](README.zh-CN.md)
+
+[![CI](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml)
 
 高性能 Go 代理将 Google Gemini 的 Web 界面转换为 OpenAI 兼容的 API。零成本、跨平台、单一静态二进制文件。
 
@@ -119,7 +121,7 @@ docker compose up -d
 
 ### Cherry Studio / ChatBox / 任何 OpenAI 客户端
 
-|领域|价值|
+|领域 |价值|
 | -------- | -------------------------------------------------------------------------------- |
 |基本网址 |`http://localhost:8081/v1`|
 | API 密钥 |任何`api_keys`价值来自`config.json`;如果没有配置的话，什么都可以|
@@ -176,7 +178,7 @@ gemini
 
 |型号|等级 |描述 |输出|
 | -------------------------------- | ----------- | ---------------------------------------------------------- | ---------------- |
-|`gemini-4-carbon`|超|长视野主体推理（前沿）|**~20k+ 字符**|
+|`gemini-4-carbon`|超|长视野主体推理（前沿） |**~20k+ 字符**|
 |`carbon`|超| gemini-4-carbon 的别名 |**~20k+ 字符**|
 |`gemini-4-neon`|专业/超|前沿推理与复杂编码 |**~20k+ 字符**|
 |`neon`|专业/超| Gemini-4-neon 的别名 |**~20k+ 字符**|
@@ -190,7 +192,7 @@ gemini
 |`gemini-3.5-flash`|免费| gemini-3.6-flash 的别名 |约 12k 个字符 |
 |`gemini-3.1-pro`|专业| Legacy Pro 老虎机（现在在 Pro 上提供 Neon）|约 12k 个字符 |
 |`gemini-3.5-flash-thinking`|免费|延伸思维，最长产出 |**约 20,000 个字符**|
-|`gemini-3.5-flash-thinking-lite`|免费|适应性思维深度 |约 15,000 个字符 |
+|`gemini-3.5-flash-thinking-lite`|免费|适应性思维深度|约 15,000 个字符 |
 |`gemini-auto`|免费|汽车选型|变化 |
 |`gemini-flash-lite`|免费|最快的答案，轻量级 | 〜10k 个字符 |
 
