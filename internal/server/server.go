@@ -15,6 +15,7 @@ type App struct {
 	Cfg        config.Config
 	Gem        *gemini.Client
 	Tokens     *multimodal.TokenCache
+	Sessions   *SessionManager
 	HTTPClient *http.Client
 	Logf       func(format string, args ...any)
 	Version    string
@@ -50,6 +51,7 @@ func New(cfg config.Config, version string) *App {
 		Cfg:        cfg,
 		Gem:        gemClient,
 		Tokens:     multimodal.NewTokenCache(cfg, gemClient.Cookies, httpClient),
+		Sessions:   NewSessionManager(cfg),
 		HTTPClient: httpClient,
 		Logf:       logFn,
 		Version:    version,

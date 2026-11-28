@@ -15,5 +15,12 @@
   "proxy": null,
   "log_requests": true,
   "impersonate": "",
-  "temporary_chats": false
+  "temporary_chats": false,
+  "session_enabled": true,
+  "max_context_tokens": 1000000,
+  "session_rollover_ratio": 0.85,
+  "compress_threshold_ratio": 0.60,
+  "keep_recent_messages": 6,
+  "session_ttl_sec": 3600,
+  "max_sessions": 1024
 }

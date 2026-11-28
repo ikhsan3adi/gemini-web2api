@@ -266,6 +266,13 @@ func (c *Client) refreshSessionOnStatus(status int, cfg *config.Config, cookieIn
 }
 
 func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (string, error) {
+	text, _, err := c.GenerateWithMeta(prompt, opt, fileRefs, SessionMeta{})
+	return text, err
+}
+
+// GenerateWithMeta sends a non-streaming prompt to Gemini, optionally continuing
+// an existing server-side conversation via meta, and returns the cleaned text and updated metadata.
+func (c *Client) GenerateWithMeta(prompt string, opt ModelOptions, fileRefs []string, meta SessionMeta) (string, SessionMeta, error) {
 	c.EnsureModelsDiscovered()
 
 	cfg, cookieInfo := c.prepareRequestConfig()
@@ -278,7 +285,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 	extra[59] = reqUUID
 
 	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
-	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	bodyStr := BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 	reqURL := BuildURL(cfg, c.CurrentBL())
 	headers := c.buildHeaders()
 	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
@@ -294,7 +301,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
-			return "", err
+			return "", SessionMeta{}, err
 		}
 		req.Header = headers.Clone()
 
@@ -309,7 +316,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 					blRefreshed = true
 					if c.refreshSessionOnStatus(resp.StatusCode, &cfg, cookieInfo) {
 						c.Logf("Session params auto-updated, retrying request")
-						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+						bodyStr = BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 						reqURL = BuildURL(cfg, c.CurrentBL())
 						attempt-- // retry without consuming an attempt
 						continue
@@ -322,11 +329,11 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 				if err != nil {
 					lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 				} else {
-					text, err := ExtractResponseText(string(rawBytes))
+					text, newMeta, err := ExtractResponseWithMeta(string(rawBytes))
 					if err != nil {
 						lastErr = &UpstreamError{Kind: "bard", Msg: err.Error()}
 					} else {
-						return text, nil
+						return text, newMeta, nil
 					}
 				}
 			}
@@ -338,10 +345,17 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		}
 	}
 
-	return "", lastErr
+	return "", SessionMeta{}, lastErr
 }
 
 func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []string, emit func(string) error) error {
+	_, err := c.GenerateStreamWithMeta(prompt, opt, fileRefs, SessionMeta{}, emit)
+	return err
+}
+
+// GenerateStreamWithMeta streams a prompt to Gemini, optionally continuing an existing
+// server-side conversation via meta, and returns the updated conversation metadata.
+func (c *Client) GenerateStreamWithMeta(prompt string, opt ModelOptions, fileRefs []string, meta SessionMeta, emit func(string) error) (SessionMeta, error) {
 	c.EnsureModelsDiscovered()
 
 	cfg, cookieInfo := c.prepareRequestConfig()
@@ -354,7 +368,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 	extra[59] = reqUUID
 
 	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
-	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	bodyStr := BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 	reqURL := BuildURL(cfg, c.CurrentBL())
 	headers := c.buildHeaders()
 	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
@@ -373,7 +387,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
-			return err
+			return SessionMeta{}, err
 		}
 		req.Header = headers.Clone()
 
@@ -388,7 +402,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 					blRefreshed = true
 					if c.refreshSessionOnStatus(resp.StatusCode, &cfg, cookieInfo) {
 						c.Logf("Session params auto-updated, retrying stream request")
-						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+						bodyStr = BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 						reqURL = BuildURL(cfg, c.CurrentBL())
 						attempt-- // retry without consuming an attempt
 						continue
@@ -399,22 +413,22 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 				err = c.streamAttempt(resp.Body, parser, emit)
 				_ = resp.Body.Close()
 				if err == nil {
-					return nil
+					return parser.Meta(), nil
 				}
 				if isClientDisconnect(err) {
-					return err
+					return SessionMeta{}, err
 				}
 				lastErr = err
 			}
 		}
 
 		if attempt < c.Cfg.RetryAttempts-1 {
-			c.Logf("Stream retry %d/%d: %v", attempt+1, c.Cfg.RetryDelaySec, lastErr)
+			c.Logf("Stream retry %d/%d: %v", attempt+1, c.Cfg.RetryAttempts, lastErr)
 			time.Sleep(time.Duration(c.Cfg.RetryDelaySec) * time.Second)
 		}
 	}
 
-	return lastErr
+	return SessionMeta{}, lastErr
 }
 
 func (c *Client) streamAttempt(body io.Reader, parser *StreamParser, emit func(string) error) error {

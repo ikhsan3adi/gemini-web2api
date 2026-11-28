@@ -31,15 +31,14 @@ func applyPersistenceFlags(inner []any, cfg config.Config) {
 	}
 }
 
-// BuildBody constructs the form-encoded payload (`f.req`) expected by Gemini's frontend RPC endpoint.
-// Gemini web uses a sparse JSON array (102 elements) where specific indices represent payload parameters:
-// - Index 0: Prompt text and image attachment references
-// - Index 17: Reasoning/thinking mode depth
-// - Index 41: Persistence/temporary chat mode (1=temporary, 2=persistent)
-// - Index 45: Additional persistence flag (1 when temporary)
-// - Index 59: Request UUID
-// - Index 79: Target model mode ID
+// BuildBody constructs a stateless form-encoded payload (`f.req`) expected by Gemini's frontend RPC endpoint.
 func BuildBody(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any, cfg config.Config) string {
+	return BuildBodyWithMeta(prompt, modelID, thinkMode, fileRefs, extra, cfg, SessionMeta{})
+}
+
+// BuildBodyWithMeta constructs the form-encoded payload (`f.req`) with optional
+// conversation metadata (cid, rid, rcid) at index 2 to continue an existing Gemini thread.
+func BuildBodyWithMeta(prompt string, modelID, thinkMode int, fileRefs []string, extra map[int]any, cfg config.Config, meta SessionMeta) string {
 	inner := make([]any, GeminiPayloadSize)
 
 	if len(fileRefs) > 0 {
@@ -53,7 +52,7 @@ func BuildBody(prompt string, modelID, thinkMode int, fileRefs []string, extra m
 	}
 
 	inner[1] = []any{"en"}
-	inner[2] = []any{"", "", "", nil, nil, nil, nil, nil, nil, ""}
+	inner[2] = []any{meta.CID, meta.RID, meta.RCID, nil, nil, nil, nil, nil, nil, ""}
 	inner[6] = []any{0}
 	inner[7] = 1
 	inner[10] = 1
