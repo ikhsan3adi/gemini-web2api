@@ -65,6 +65,9 @@ func main() {
 	if *cookieFlag != "" {
 		cfg.CookieFile = *cookieFlag
 	}
+	if cfg.CookieFile == "" {
+		cfg.CookieFile = config.FindCookie()
+	}
 	if *proxyFlag != "" {
 		cfg.Proxy = *proxyFlag
 	}

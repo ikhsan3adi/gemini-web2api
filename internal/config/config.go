@@ -129,11 +129,10 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func Find() string {
-	paths := []string{"./config.json"}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		paths = append(paths, filepath.Join(home, ".config", "gemini-web2api", "config.json"))
+func findFirstExisting(filename string) string {
+	paths := []string{filepath.Join(".", filename)}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".config", "gemini-web2api", filename))
 	}
 
 	for _, p := range paths {
@@ -142,4 +141,13 @@ func Find() string {
 		}
 	}
 	return ""
+}
+
+func Find() string {
+	return findFirstExisting("config.json")
+}
+
+// FindCookie returns the default cookie.json path if present in standard locations.
+func FindCookie() string {
+	return findFirstExisting("cookie.json")
 }

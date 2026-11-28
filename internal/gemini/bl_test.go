@@ -58,6 +58,12 @@ func TestBLRegex(t *testing.T) {
 			found: true,
 		},
 		{
+			name:  "found uiserver",
+			html:  `some garbage boq_gemini-web-uiserver_20261124.14_p0 more garbage`,
+			want:  "boq_gemini-web-uiserver_20261124.14_p0",
+			found: true,
+		},
+		{
 			name:  "not found",
 			html:  `no matching pattern here`,
 			want:  "",
