@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
-	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -42,29 +41,10 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		req.ToolChoice = "auto"
 	}
 
-	prompt, images, err := format.MessagesToPrompt(req)
+	prompt, _, err := format.MessagesToPrompt(req)
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return
-	}
-
-	// Upload images to Gemini storage.
-	var fileRefs []string
-	if len(images) > 0 {
-		fileRefs, err = a.uploadImages(images)
-		if err != nil {
-			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-			return
-		}
-	}
-
-	gemOpt := gemini.ModelOptions{
-		ModelName:   resolved.Name,
-		ModelID:     resolved.Mode,
-		ThinkMode:   resolved.Think,
-		ModelHeader: resolved.Header,
-		Extra:       resolved.Extra,
 	}
 
 	cid := fmt.Sprintf("chatcmpl-%s", format.RandHex(12))
@@ -73,73 +53,89 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	isToolNone := isStr && strChoice == "none"
 
 	if req.Stream && (len(req.Tools) == 0 || isToolNone) {
-		if !startSSE(w) {
+		_, started, emitErr := a.streamWithSession(
+			w, r, resolved, req,
+			func(_ *SessionPlan) bool {
+				if !startSSE(w) {
+					return false
+				}
+				firstChunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index: 0,
+							Delta: &models.OpenAIMessage{
+								Role: "assistant",
+							},
+							FinishReason: nil,
+						},
+					},
+				}
+				_ = writeSSEData(w, firstChunk)
+				return true
+			},
+			func(delta string) error {
+				chunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index: 0,
+							Delta: &models.OpenAIMessage{
+								Content: delta,
+							},
+							FinishReason: nil,
+						},
+					},
+				}
+				return writeSSEData(w, chunk)
+			},
+		)
+
+		if emitErr != nil {
+			if !started {
+				if isSessionValidationError(emitErr) {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": emitErr.Error()}})
+				} else {
+					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", emitErr)}})
+				}
+			} else {
+				a.Logf("Chat stream error: %v", emitErr)
+			}
 			return
 		}
 
-		// Emit first chunk with role to match OpenAI streaming protocol.
-		firstChunk := models.OpenAIChatResponse{
+		stopReason := "stop"
+		endChunk := models.OpenAIChatResponse{
 			ID:      cid,
 			Object:  "chat.completion.chunk",
 			Created: time.Now().Unix(),
 			Model:   resolved.Name,
 			Choices: []models.OpenAIChoice{
 				{
-					Index: 0,
-					Delta: &models.OpenAIMessage{
-						Role: "assistant",
-					},
-					FinishReason: nil,
+					Index:        0,
+					Delta:        &models.OpenAIMessage{},
+					FinishReason: &stopReason,
 				},
 			},
 		}
-		_ = writeSSEData(w, firstChunk)
-
-		emitErr := a.Gem.GenerateStream(prompt, gemOpt, fileRefs, func(delta string) error {
-			chunk := models.OpenAIChatResponse{
-				ID:      cid,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   resolved.Name,
-				Choices: []models.OpenAIChoice{
-					{
-						Index: 0,
-						Delta: &models.OpenAIMessage{
-							Content: delta,
-						},
-						FinishReason: nil,
-					},
-				},
-			}
-			return writeSSEData(w, chunk)
-		})
-
-		if emitErr == nil {
-			stopReason := "stop"
-			endChunk := models.OpenAIChatResponse{
-				ID:      cid,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   resolved.Name,
-				Choices: []models.OpenAIChoice{
-					{
-						Index:        0,
-						Delta:        &models.OpenAIMessage{},
-						FinishReason: &stopReason,
-					},
-				},
-			}
-			_ = writeSSEData(w, endChunk)
-			_ = writeSSEDone(w)
-		} else {
-			a.Logf("Chat stream error: %v", emitErr)
-		}
+		_ = writeSSEData(w, endChunk)
+		_ = writeSSEDone(w)
 		return
 	}
 
-	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
+	text, _, err := a.generateWithSession(w, r, resolved, req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+		if isSessionValidationError(err) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		} else {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+		}
 		return
 	}
 

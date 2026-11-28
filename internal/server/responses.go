@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
-	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -84,34 +83,19 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		ToolChoice: toolChoice,
 	}
 
-	prompt, images, err := format.MessagesToPrompt(chatReq)
+	prompt, _, err := format.MessagesToPrompt(chatReq)
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty input"}})
 		return
 	}
 
-	// Upload images to Gemini storage.
-	var fileRefs []string
-	if len(images) > 0 {
-		fileRefs, err = a.uploadImages(images)
-		if err != nil {
-			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-			return
-		}
-	}
-
-	gemOpt := gemini.ModelOptions{
-		ModelName:   resolved.Name,
-		ModelID:     resolved.Mode,
-		ThinkMode:   resolved.Think,
-		ModelHeader: resolved.Header,
-		Extra:       resolved.Extra,
-	}
-
-	text, err := a.Gem.Generate(prompt, gemOpt, fileRefs)
+	text, plan, err := a.generateWithSession(w, r, resolved, chatReq)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+		if isSessionValidationError(err) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		} else {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+		}
 		return
 	}
 
@@ -130,6 +114,9 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	stream, _ := req["stream"].(bool)
 	promptTokens := len(prompt) / 4
+	if plan != nil && plan.PromptTokens > 0 {
+		promptTokens = plan.PromptTokens
+	}
 	outputTokens := len(text) / 4
 
 	if stream {

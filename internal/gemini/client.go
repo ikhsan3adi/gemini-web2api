@@ -43,6 +43,7 @@ type Client struct {
 	Logf    func(format string, args ...any)
 	blMu    sync.Mutex
 	bl      string
+	xsrf    string
 
 	modelsMu      sync.RWMutex
 	discovered    []DiscoveredModel
@@ -117,15 +118,54 @@ func (c *Client) SetBL(bl string) {
 	c.bl = bl
 }
 
-// UpdateBLIfNeeded fetches the latest BL from Gemini and updates it if different from current.
-// Returns (newBL, changed, error).
+// CurrentXSRF returns the dynamically fetched SNlM0e XSRF token, if any.
+func (c *Client) CurrentXSRF() string {
+	c.blMu.Lock()
+	defer c.blMu.Unlock()
+	return c.xsrf
+}
+
+// SetXSRF updates the cached SNlM0e XSRF token.
+func (c *Client) SetXSRF(xsrf string) {
+	c.blMu.Lock()
+	defer c.blMu.Unlock()
+	c.xsrf = xsrf
+}
+
+// resolveXSRF returns the effective XSRF token from config, cookie file, or fetched page session.
+func (c *Client) resolveXSRF(cookieInfo CookieInfo) string {
+	if c.Cfg.XSRFToken != "" {
+		return c.Cfg.XSRFToken
+	}
+	if cookieInfo.XSRFToken != "" {
+		return cookieInfo.XSRFToken
+	}
+	return c.CurrentXSRF()
+}
+
+// UpdateBLIfNeeded fetches the latest BL (and SNlM0e XSRF token when cookies are configured)
+// from Gemini and updates cached state if different from current. Returns (newBL, changed, error).
 func (c *Client) UpdateBLIfNeeded() (string, bool, error) {
-	newBL, err := FetchLatestBL(c.HTTP)
+	var cookieHeader string
+	authUser := c.Cfg.AuthUser
+	if c.Cookies != nil {
+		if info, err := c.Cookies.Load(); err == nil {
+			cookieHeader = info.Cookie
+			if authUser == "" {
+				authUser = info.AuthUser
+			}
+		}
+	}
+
+	newBL, newXSRF, err := FetchSessionParams(c.HTTP, cookieHeader, authUser)
 	if err != nil {
 		return "", false, err
 	}
+	if newXSRF != "" {
+		c.SetXSRF(newXSRF)
+	}
 	if newBL == "" {
-		return "", false, fmt.Errorf("empty BL fetched")
+		return "", false, fmt.Errorf("BL pattern not found in response")
 	}
 	oldBL := c.CurrentBL()
 	if newBL == oldBL {
@@ -196,17 +236,46 @@ func (c *Client) triageStatus(resp *http.Response) error {
 	return nil
 }
 
-func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (string, error) {
-	c.EnsureModelsDiscovered()
-
-	cookieInfo, _ := c.Cookies.Load()
-	cfg := c.Cfg
-	if cfg.XSRFToken == "" && cookieInfo.XSRFToken != "" {
-		cfg.XSRFToken = cookieInfo.XSRFToken
+func (c *Client) prepareRequestConfig() (config.Config, CookieInfo) {
+	var cookieInfo CookieInfo
+	if c.Cookies != nil {
+		cookieInfo, _ = c.Cookies.Load()
 	}
+	cfg := c.Cfg
+	cfg.XSRFToken = c.resolveXSRF(cookieInfo)
 	if cfg.AuthUser == "" && cookieInfo.AuthUser != "" {
 		cfg.AuthUser = cookieInfo.AuthUser
 	}
+	return cfg, cookieInfo
+}
+
+func (c *Client) refreshSessionOnStatus(status int, cfg *config.Config, cookieInfo CookieInfo) bool {
+	if status != http.StatusMethodNotAllowed && status != http.StatusBadRequest {
+		return false
+	}
+	prevXSRF := cfg.XSRFToken
+	_, changed, err := c.UpdateBLIfNeeded()
+	if err != nil {
+		return false
+	}
+	newXSRF := c.resolveXSRF(cookieInfo)
+	if newXSRF != "" {
+		cfg.XSRFToken = newXSRF
+	}
+	return changed || (newXSRF != "" && newXSRF != prevXSRF)
+}
+
+func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (string, error) {
+	text, _, err := c.GenerateWithMeta(prompt, opt, fileRefs, SessionMeta{})
+	return text, err
+}
+
+// GenerateWithMeta sends a non-streaming prompt to Gemini, optionally continuing
+// an existing server-side conversation via meta, and returns the cleaned text and updated metadata.
+func (c *Client) GenerateWithMeta(prompt string, opt ModelOptions, fileRefs []string, meta SessionMeta) (string, SessionMeta, error) {
+	c.EnsureModelsDiscovered()
+
+	cfg, cookieInfo := c.prepareRequestConfig()
 
 	reqUUID := strings.ToUpper(uuidV4())
 	extra := make(map[int]any, len(opt.Extra)+1)
@@ -216,7 +285,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 	extra[59] = reqUUID
 
 	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
-	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	bodyStr := BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 	reqURL := BuildURL(cfg, c.CurrentBL())
 	headers := c.buildHeaders()
 	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
@@ -232,7 +301,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
-			return "", err
+			return "", SessionMeta{}, err
 		}
 		req.Header = headers.Clone()
 
@@ -242,12 +311,12 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
-				// 405 = BL expired. Refresh once and retry without consuming an attempt.
-				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
+				// 405 = BL expired, 400 = stale/missing XSRF or BL. Refresh once and retry without consuming an attempt.
+				if !blRefreshed && (resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusBadRequest) {
 					blRefreshed = true
-					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
-						c.Logf("BL auto-updated, retrying request")
-						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+					if c.refreshSessionOnStatus(resp.StatusCode, &cfg, cookieInfo) {
+						c.Logf("Session params auto-updated, retrying request")
+						bodyStr = BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 						reqURL = BuildURL(cfg, c.CurrentBL())
 						attempt-- // retry without consuming an attempt
 						continue
@@ -260,11 +329,11 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 				if err != nil {
 					lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 				} else {
-					text, err := ExtractResponseText(string(rawBytes))
+					text, newMeta, err := ExtractResponseWithMeta(string(rawBytes))
 					if err != nil {
 						lastErr = &UpstreamError{Kind: "bard", Msg: err.Error()}
 					} else {
-						return text, nil
+						return text, newMeta, nil
 					}
 				}
 			}
@@ -276,20 +345,20 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		}
 	}
 
-	return "", lastErr
+	return "", SessionMeta{}, lastErr
 }
 
 func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []string, emit func(string) error) error {
+	_, err := c.GenerateStreamWithMeta(prompt, opt, fileRefs, SessionMeta{}, emit)
+	return err
+}
+
+// GenerateStreamWithMeta streams a prompt to Gemini, optionally continuing an existing
+// server-side conversation via meta, and returns the updated conversation metadata.
+func (c *Client) GenerateStreamWithMeta(prompt string, opt ModelOptions, fileRefs []string, meta SessionMeta, emit func(string) error) (SessionMeta, error) {
 	c.EnsureModelsDiscovered()
 
-	cookieInfo, _ := c.Cookies.Load()
-	cfg := c.Cfg
-	if cfg.XSRFToken == "" && cookieInfo.XSRFToken != "" {
-		cfg.XSRFToken = cookieInfo.XSRFToken
-	}
-	if cfg.AuthUser == "" && cookieInfo.AuthUser != "" {
-		cfg.AuthUser = cookieInfo.AuthUser
-	}
+	cfg, cookieInfo := c.prepareRequestConfig()
 
 	reqUUID := strings.ToUpper(uuidV4())
 	extra := make(map[int]any, len(opt.Extra)+1)
@@ -299,7 +368,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 	extra[59] = reqUUID
 
 	modelHdr, effectiveMode := c.resolveModelHeader(opt, reqUUID)
-	bodyStr := BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+	bodyStr := BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 	reqURL := BuildURL(cfg, c.CurrentBL())
 	headers := c.buildHeaders()
 	headers.Set(HeaderUUIDJspb, fmt.Sprintf(`["%s",1]`, reqUUID))
@@ -318,7 +387,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 
 		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
-			return err
+			return SessionMeta{}, err
 		}
 		req.Header = headers.Clone()
 
@@ -328,12 +397,12 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		} else {
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
-				// 405 = BL expired. Refresh once and retry without consuming an attempt.
-				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
+				// 405 = BL expired, 400 = stale/missing XSRF or BL. Refresh once and retry without consuming an attempt.
+				if !blRefreshed && (resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusBadRequest) {
 					blRefreshed = true
-					if _, changed, blErr := c.UpdateBLIfNeeded(); blErr == nil && changed {
-						c.Logf("BL auto-updated, retrying stream request")
-						bodyStr = BuildBody(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg)
+					if c.refreshSessionOnStatus(resp.StatusCode, &cfg, cookieInfo) {
+						c.Logf("Session params auto-updated, retrying stream request")
+						bodyStr = BuildBodyWithMeta(prompt, effectiveMode, opt.ThinkMode, fileRefs, extra, cfg, meta)
 						reqURL = BuildURL(cfg, c.CurrentBL())
 						attempt-- // retry without consuming an attempt
 						continue
@@ -344,10 +413,10 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 				err = c.streamAttempt(resp.Body, parser, emit)
 				_ = resp.Body.Close()
 				if err == nil {
-					return nil
+					return parser.Meta(), nil
 				}
 				if isClientDisconnect(err) {
-					return err
+					return SessionMeta{}, err
 				}
 				lastErr = err
 			}
@@ -359,7 +428,7 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		}
 	}
 
-	return lastErr
+	return SessionMeta{}, lastErr
 }
 
 func (c *Client) streamAttempt(body io.Reader, parser *StreamParser, emit func(string) error) error {

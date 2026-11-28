@@ -89,10 +89,7 @@ func (c *Client) DiscoverModels() ([]DiscoveredModel, error) {
 		authUser = cookieInfo.AuthUser
 	}
 
-	xsrf := c.Cfg.XSRFToken
-	if xsrf == "" && cookieInfo.XSRFToken != "" {
-		xsrf = cookieInfo.XSRFToken
-	}
+	xsrf := c.resolveXSRF(cookieInfo)
 
 	bl := c.CurrentBL()
 	if bl == "" && cookieInfo.GeminiBL != "" {
