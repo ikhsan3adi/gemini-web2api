@@ -1,4 +1,4 @@
-<!-- markdown-translator:0aa036af3f1a26e9943f61a84a87c44de7cb165319c9ade840c5822c7e401dc3 -->
+<!-- markdown-translator:b53ef407123ad63d9fe15c7fb4ba82cef2f0cef506e0a6a5be39cac111c67001 -->
 # Gemini-web2api
 
 <p align="center">
@@ -9,7 +9,7 @@
 
 [![CI](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml)
 
-高性能 Go 代理将 Google Gemini 的 Web 界面转换为 OpenAI 兼容的 API。零成本、跨平台、单一静态二进制文件。
+高性能 Go 代理将 Google Gemini 的 Web 界面转换为 OpenAI 兼容的 Anthropic Messages API。零成本、跨平台、单一静态二进制文件。
 
 这是对原始版本的完全 Go 重写[Python gemini-web2api](https://github.com/Sophomoresty/gemini-web2api)。它具有巨大的并发吞吐量、最小的内存占用以及增强的功能，例如**TLS 模拟**用于WAF绕过。
 
@@ -17,8 +17,11 @@
 
 * **可选 API 密钥**: 没有授权时`api_keys`配置后为空，OpenAI 风格的承载身份验证。
 * **兼容 OpenAI**：直接替代`/v1/chat/completions`,`/v1/models`， 和`/v1/responses`（法典 CLI）。
+* **人择兼容**:`/v1/messages`和`/v1/messages/count_tokens`与 Claude Code 的 SSE 流式传输。
+* **浏览器 Cookie 导入**: Cookie 编辑器风格`cookie.json`被自动检测到时`cookie_file`未设置。
+* **有状态会话**：Gemini Web 线程的可选延续，具有上下文压缩和长期运行的翻转。
 * **多式联运（视觉）**：完全支持发送图像（`image_url`/base64) 到 Gemini，使用 Scotty 可恢复上传协议本机内置图像压缩。
-* **TLS 模拟**：内置支持通过模仿 Chrome/Edge TLS 指纹来绕过 Cloudflare/WAF`tls-client`🔥.
+* **TLS 模拟**：内置支持通过模仿 Chrome/Edge TLS 指纹来绕过 Cloudflare/WAF`tls-client`.
 * **工具调用**：全函数调用支持（OpenAI格式）。
 * **多种型号**：Gemini 4 Carbon、Neon、Argon 和 Hydrogen，以及旧版 Flash、Thinking、Pro、Auto 和 Lite 型号。您帐户名册上的可用模型会在启动时自动注册。
 * **思考深度**：可通过调整推理`@think=N`后缀（0=最深，4=最浅）。
@@ -96,6 +99,8 @@ go build -o gemini-web2api.exe .
 cp config.example.json config.json
 ```
 
+对于 cookie 身份验证，请将您的浏览器 cookie 导出到`cookie.json`（看[如何获取cookies](#how-to-get-cookies)）并添加`-v ./cookie.json:/app/cookie.json:ro`到下面的命令。 Docker Compose 会自动安装它。
+
 #### 选项 A：运行预构建的 GHCR 映像（无需 git 克隆）
 
 ```bash
@@ -158,6 +163,24 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
+### 克劳德代码（人择消息 API）
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8081
+export ANTHROPIC_API_KEY=sk-your-key
+export ANTHROPIC_MODEL=gemini-4-hydrogen
+claude
+```
+
+支持人择消息端点：
+
+* `POST /v1/messages`: 非流式 JSON 和流式 SSE (`message_start`,`content_block_*`,`message_delta`,`message_stop`)
+* `POST /v1/messages/count_tokens`：返回基于字符的标记估计（`len(prompt) / 4`)
+
+与饼干和`session_enabled: true`，多轮 Claude Code 请求继续同一个 Gemini Web 线程。看[有状态会话](#4-stateful-sessions).
+
+> **笔记**： 什么时候`stream: true`在启用工具定义的情况下发送（`tool_choice != "none"`)，服务器缓冲上游响应来解析`tool_call`在发出 Anthropic SSE 事件之前阻塞，而不是实时流式传输原始令牌。
+
 ### 双子座命令行界面
 
 ```bash
@@ -168,9 +191,9 @@ gemini
 
 支持 Google 本机 API 端点：
 
-* `GET /v1beta/models`— 列出型号
-* `POST /v1beta/models/{model}:generateContent`— 非流媒体
-* `POST /v1beta/models/{model}:streamGenerateContent`— 流媒体（上交所）
+* `GET /v1beta/models`：列出型号
+* `POST /v1beta/models/{model}:generateContent`：非流媒体
+* `POST /v1beta/models/{model}:streamGenerateContent`：流媒体（上海证券交易所）
 
 ## 可用型号
 
@@ -249,6 +272,15 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 或者在`config.json`:`"impersonate": "chrome_120"`。支持的配置文件包括`chrome_112`到`chrome_130`,`edge`， 和`safari`.
 
+### 4. 有状态会话
+
+与饼干和`session_enabled: true`，代理保持 Gemini Web 线程状态（`cid`/`rid`/`rcid`）跨轮并仅发送新消息。一旦使用结束，超大对话就会被压缩`compress_threshold_ratio * max_context_tokens`，会话将转到一个新的线程，其中的摘要接近`session_rollover_ratio * max_context_tokens`或者在上游上下文错误之后。
+
+* 发送`X-Session-Id`（或者`X-Conversation-Id`) 固定对话。标题限制为 128 个字符。
+* 回应暴露`X-Gemini-Session-Id`,`X-Gemini-Session-Rollover`， 和`X-Gemini-Context-Compressed`.
+* 自动匹配需要调用者凭证（`Authorization`,`x-api-key`,`x-goog-api-key`， 或者`?key=`），并且密钥的范围仅限于该凭证，因此单独的调用者永远不会共享线程。没有凭证的请求保持无状态。
+* 调整行为`max_context_tokens`,`keep_recent_messages`,`session_rollover_ratio`,`compress_threshold_ratio`,`session_ttl_sec`， 和`max_sessions`.
+
 ## 可选：Pro / Ultra 型号的 Cookie
 
 匿名访问涵盖免费层插槽（`gemini-4-hydrogen`和旧版 Flash/Lite），目前解析为 Gemini 4 Hydrogen。`gemini-4-argon`需要**谷歌人工智能专业版**,`gemini-4-neon`需要**专业/超**， 和`gemini-4-carbon`需要**极端主义者**。如果没有授权 cookie，请求仍然会成功，但每个层槽都会解析为帐户上可用的最佳模型。
@@ -256,6 +288,8 @@ gemini-4-argon@think=4              # Low (default for standard models)
 ```bash
 ./gemini-web2api --cookie-file gemini-auth.json
 ```
+
+什么时候`cookie_file`未设置，服务器寻找`./cookie.json`首先，然后`~/.config/gemini-web2api/cookie.json`.
 
 ### 如何获取cookies
 
@@ -268,7 +302,9 @@ gemini-4-argon@think=4              # Low (default for standard models)
 SID=your_sid; HSID=your_hsid; SSID=your_ssid; APISID=your_apisid; SAPISID=your_sapisid; __Secure-1PSID=your_1psid
 ```
 
-或者如果您知道自己的具体情况，请使用 JSON 格式`SAPISID`散列需求：
+5. 或者使用浏览器扩展（例如 Cookie-Editor）将 cookie 导出为 JSON 数组，并将文件另存为`cookie.json`。服务器仅保留 Google 域条目。模板可在`cookie.example.json`.
+
+如果您愿意设置，单对象 JSON 格式仍然有效`SAPISID`明确地：
 
 ```json
 { "cookie": "SID=xxx; HSID=xxx; ...", "sapisid": "your_sapisid_value" }
@@ -278,26 +314,28 @@ SID=your_sid; HSID=your_hsid; SSID=your_ssid; APISID=your_apisid; SAPISID=your_s
 
 ### 经过身份验证的帐户路径和 XSRF 令牌
 
+配置cookie后，服务器会获取当前的`bl`和`SNlM0e`来自登录的 XSRF 令牌`/app`页面，并在上游 HTTP 400 或 405 后刷新一次。显式值`config.json`被用作起点。
+
 如果登录的 Gemini 页面 URL 包含帐户索引，例如：
 
 ```text
 https://gemini.google.com/u/1/app/...
 ```
 
-放`auth_user`到该索引。经过身份验证的 Web 请求可能还需要页面 XSRF 令牌。在渲染的 Gemini 页面源代码中，此令牌公开为`SNlM0e`;将其传递为`xsrf_token`在`config.json`。服务器将其作为`at`表单字段。
+放`auth_user`到该索引。要自行固定令牌，请复制`SNlM0e`从渲染的页面源并将其设置为`xsrf_token`;服务器将其发送为`at`表单字段。
 
 例子：
 
 ```json
 {
-  "cookie_file": "/app/cookie.txt",
+  "cookie_file": "./cookie.json",
   "auth_user": "1",
   "xsrf_token": "AOOh0P...",
   "gemini_bl": "boq_assistant-bard-web-server_YYYYMMDD.xx_p0"
 }
 ```
 
-如果经过身份验证的请求返回 HTTP 400`xsrf`错误，刷新Gemini Web，更新`xsrf_token`，并确保`auth_user`匹配`/u/<index>/`浏览器 URL 的一部分。
+`cookie_file`当`cookie.json`被自动检测到；`xsrf_token`和`gemini_bl`是可选的，因为它们是从页面中发现的。如果经过身份验证的请求不断返回 HTTP 400`xsrf`错误，刷新Gemini Web，更新`xsrf_token`手动，并确保`auth_user`匹配`/u/<index>/`浏览器 URL 的一部分。
 
 型号可用性取决于您的帐户级别。免费帐户 cookie 通常会进行身份验证，但 Pro/Ultra 老虎机解析为免费层模型（例如，日常老虎机提供 Gemini 4 Hydrogen）。
 
@@ -319,11 +357,20 @@ https://gemini.google.com/u/1/app/...
   "cookie_file": null,
   "proxy": null,
   "impersonate": null,
-  "log_requests": true
+  "log_requests": true,
+  "session_enabled": true,
+  "max_context_tokens": 1000000,
+  "session_rollover_ratio": 0.85,
+  "compress_threshold_ratio": 0.60,
+  "keep_recent_messages": 6,
+  "session_ttl_sec": 3600,
+  "max_sessions": 1024
 }
 ```
 
-什么时候`api_keys`是空的`[]`，身份验证已禁用。设置按键后，`/v1/*`端点需要`Authorization: Bearer <key>`.
+什么时候`api_keys`是空的`[]`，身份验证已禁用。设置按键后，`/v1/*`端点需要`Authorization: Bearer <key>`（或者`x-api-key`).
+
+什么时候`session_enabled`是`true`并加载 cookie，代理继续 Gemini Web 线程（`cid`/`rid`/`rcid`），压缩旧的/大的转弯过去`compress_threshold_ratio`，然后转到一个新的会话，其中包含过去的压缩摘要`session_rollover_ratio`（或对上游上下文错误做出反应）。浏览器导出的 cookie 数组（`cookie.json`， 看`cookie.example.json`) 受支持并在存在时自动检测。
 
 ## 代理人
 
@@ -364,7 +411,7 @@ gemini-web2api.exe
 ## 局限性
 
 * **层相关路由**：Gemini Web 应用程序通过层槽而不是直接模型切换来公开模型。如果没有授权 cookie，Pro/Ultra 型号名称将解析为同一插槽上可用的最佳型号。
-* **仅单圈**：每个请求都是一个独立的对话。通过在提示中包含先前的消息来模拟多轮上下文。
+* **会话连续性和代币估计**：与饼干和`session_enabled: true`，多回合上下文使用 Gemini Web 线程（`cid`/`rid`/`rcid`) 具有自动上下文压缩和翻转功能；匿名设置保持单轮。令牌计入`usage`和`/v1/messages/count_tokens`是基于字符的估计（`len / 4`).
 * **速率限制**：Google 可能会限制高频请求。服务器会自动重试，但持续的大量使用可能会被阻止。
 
 ## 执照

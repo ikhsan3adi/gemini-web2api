@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ikhsan3adi/gemini-web2api/actions/workflows/ci.yml)
 
-High-performance Go proxy converting Google Gemini's web interface into an OpenAI-compatible API. Zero cost, cross-platform, single static binary.
+High-performance Go proxy converting Google Gemini's web interface into OpenAI-compatible and Anthropic Messages APIs. Zero cost, cross-platform, single static binary.
 
 This is a complete Go rewrite of the original [Python gemini-web2api](https://github.com/Sophomoresty/gemini-web2api). It features massive concurrency throughput, minimal memory footprint, and enhanced capabilities such as **TLS Impersonation** for WAF bypass.
 
@@ -16,8 +16,11 @@ This is a complete Go rewrite of the original [Python gemini-web2api](https://gi
 
 - **Optional API Keys**: No auth when `api_keys` is empty, OpenAI-style Bearer auth when configured.
 - **OpenAI Compatible**: Drop-in replacement for `/v1/chat/completions`, `/v1/models`, and `/v1/responses` (Codex CLI).
+- **Anthropic Compatible**: `/v1/messages` and `/v1/messages/count_tokens` with SSE streaming for Claude Code 🔥.
+- **Browser Cookie Import**: Cookie-Editor style `cookie.json` is detected automatically when `cookie_file` is unset.
+- **Stateful Sessions**: Optional continuation of Gemini Web threads with context compression and rollover for long runs.
 - **Multimodal (Vision)**: Fully supports sending images (`image_url` / base64) to Gemini using Scotty Resumable Upload protocol natively with built-in image compression.
-- **TLS Impersonation**: Built-in support to bypass Cloudflare/WAF by mimicking Chrome/Edge TLS fingerprints using `tls-client` 🔥.
+- **TLS Impersonation**: Built-in support to bypass Cloudflare/WAF by mimicking Chrome/Edge TLS fingerprints using `tls-client`.
 - **Tool Calling**: Full function calling support (OpenAI format).
 - **Multiple Models**: Gemini 4 Carbon, Neon, Argon and Hydrogen, plus legacy Flash, Thinking, Pro, Auto, and Lite models. Models available on your account roster are auto-registered at startup.
 - **Thinking Depth**: Adjustable reasoning via `@think=N` suffix (0=deepest, 4=shallowest).
@@ -95,6 +98,8 @@ Before running via Docker, copy the example config file:
 cp config.example.json config.json
 ```
 
+For cookie authentication, export your browser cookies to `cookie.json` (see [How to get cookies](#how-to-get-cookies)) and add `-v ./cookie.json:/app/cookie.json:ro` to the commands below. Docker Compose mounts it automatically.
+
 #### Option A: Run pre-built GHCR Image (No git clone needed)
 
 ```bash
@@ -168,8 +173,10 @@ claude
 
 Supports Anthropic Messages endpoints:
 
-- `POST /v1/messages` — non-streaming JSON and streaming SSE (`message_start`, `content_block_*`, `message_delta`, `message_stop`)
-- `POST /v1/messages/count_tokens` — returns character-based token estimates (`len(prompt) / 4`)
+- `POST /v1/messages`: non-streaming JSON and streaming SSE (`message_start`, `content_block_*`, `message_delta`, `message_stop`)
+- `POST /v1/messages/count_tokens`: returns character-based token estimates (`len(prompt) / 4`)
+
+With cookies and `session_enabled: true`, multi-turn Claude Code requests continue the same Gemini Web thread. See [Stateful Sessions](#4-stateful-sessions).
 
 > **Note**: When `stream: true` is sent with tool definitions enabled (`tool_choice != "none"`), the server buffers the upstream response to parse `tool_call` blocks before emitting Anthropic SSE events rather than streaming raw tokens live.
 
@@ -183,9 +190,9 @@ gemini
 
 Supports Google native API endpoints:
 
-- `GET /v1beta/models` — list models
-- `POST /v1beta/models/{model}:generateContent` — non-streaming
-- `POST /v1beta/models/{model}:streamGenerateContent` — streaming (SSE)
+- `GET /v1beta/models`: list models
+- `POST /v1beta/models/{model}:generateContent`: non-streaming
+- `POST /v1beta/models/{model}:streamGenerateContent`: streaming (SSE)
 
 ## Available Models
 
@@ -263,6 +270,15 @@ If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks 
 
 Or in `config.json`: `"impersonate": "chrome_120"`. Supported profiles include `chrome_112` to `chrome_130`, `edge`, and `safari`.
 
+### 4. Stateful Sessions
+
+With cookies and `session_enabled: true`, the proxy keeps Gemini Web thread state (`cid`/`rid`/`rcid`) across turns and sends only new messages. Oversized conversations are compressed once usage passes `compress_threshold_ratio * max_context_tokens`, and the session rolls over to a fresh thread with a summary near `session_rollover_ratio * max_context_tokens` or after an upstream context error.
+
+- Send `X-Session-Id` (or `X-Conversation-Id`) to pin a conversation. The header is limited to 128 characters.
+- Responses expose `X-Gemini-Session-Id`, `X-Gemini-Session-Rollover`, and `X-Gemini-Context-Compressed`.
+- Automatic matching needs a caller credential (`Authorization`, `x-api-key`, `x-goog-api-key`, or `?key=`), and the key is scoped to that credential so separate callers never share a thread. Requests without a credential stay stateless.
+- Tune behavior with `max_context_tokens`, `keep_recent_messages`, `session_rollover_ratio`, `compress_threshold_ratio`, `session_ttl_sec`, and `max_sessions`.
+
 ## Optional: Cookie for Pro / Ultra Models
 
 Anonymous access covers the free-tier slots (`gemini-4-hydrogen` and legacy Flash/Lite), which currently resolve to Gemini 4 Hydrogen. `gemini-4-argon` requires **Google AI Pro**, `gemini-4-neon` requires **Pro / Ultra**, and `gemini-4-carbon` requires **Ultra**. Without an entitled cookie, requests still succeed but each tier slot resolves to the best model available on the account.
@@ -270,6 +286,8 @@ Anonymous access covers the free-tier slots (`gemini-4-hydrogen` and legacy Flas
 ```bash
 ./gemini-web2api --cookie-file gemini-auth.json
 ```
+
+When `cookie_file` is unset, the server looks for `./cookie.json` first, then `~/.config/gemini-web2api/cookie.json`.
 
 ### How to get cookies
 
@@ -282,7 +300,9 @@ Anonymous access covers the free-tier slots (`gemini-4-hydrogen` and legacy Flas
 SID=your_sid; HSID=your_hsid; SSID=your_ssid; APISID=your_apisid; SAPISID=your_sapisid; __Secure-1PSID=your_1psid
 ```
 
-Or use JSON format if you know your specific `SAPISID` hashing needs:
+5. Or export the cookies as a JSON array with a browser extension such as Cookie-Editor and save the file as `cookie.json`. The server keeps Google-domain entries only. A template is available in `cookie.example.json`.
+
+The single-object JSON format still works if you prefer to set `SAPISID` explicitly:
 
 ```json
 { "cookie": "SID=xxx; HSID=xxx; ...", "sapisid": "your_sapisid_value" }
@@ -292,26 +312,28 @@ Or use JSON format if you know your specific `SAPISID` hashing needs:
 
 ### Authenticated account path and XSRF token
 
+With cookies configured, the server fetches the current `bl` and the `SNlM0e` XSRF token from the signed-in `/app` page, and refreshes them once after an upstream HTTP 400 or 405. Explicit values in `config.json` are used as the starting point.
+
 If the signed-in Gemini page URL contains an account index, such as:
 
 ```text
 https://gemini.google.com/u/1/app/...
 ```
 
-set `auth_user` to that index. Authenticated web requests may also require the page XSRF token. In the rendered Gemini page source, this token is exposed as `SNlM0e`; pass it as `xsrf_token` in `config.json`. The server sends it as the `at` form field.
+set `auth_user` to that index. To pin the token yourself, copy `SNlM0e` from the rendered page source and set it as `xsrf_token`; the server sends it as the `at` form field.
 
 Example:
 
 ```json
 {
-  "cookie_file": "/app/cookie.txt",
+  "cookie_file": "./cookie.json",
   "auth_user": "1",
   "xsrf_token": "AOOh0P...",
   "gemini_bl": "boq_assistant-bard-web-server_YYYYMMDD.xx_p0"
 }
 ```
 
-If authenticated requests return HTTP 400 with an `xsrf` error, refresh Gemini Web, update `xsrf_token`, and make sure `auth_user` matches the `/u/<index>/` part of the browser URL.
+`cookie_file` is optional when `cookie.json` is auto-detected; `xsrf_token` and `gemini_bl` are optional because they are discovered from the page. If authenticated requests keep returning HTTP 400 with an `xsrf` error, refresh Gemini Web, update `xsrf_token` manually, and make sure `auth_user` matches the `/u/<index>/` part of the browser URL.
 
 Model availability follows your account tier. A free account cookie authenticates normally, but the Pro/Ultra slots resolve to free-tier models (for example the everyday slot serves Gemini 4 Hydrogen).
 
