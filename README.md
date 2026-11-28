@@ -155,6 +155,22 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
+### Claude Code (Anthropic Messages API)
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8081
+export ANTHROPIC_API_KEY=sk-your-key
+export ANTHROPIC_MODEL=gemini-4-hydrogen
+claude
+```
+
+Supports Anthropic Messages endpoints:
+
+- `POST /v1/messages` — non-streaming JSON and streaming SSE (`message_start`, `content_block_*`, `message_delta`, `message_stop`)
+- `POST /v1/messages/count_tokens` — returns character-based token estimates (`len(prompt) / 4`)
+
+> **Note**: When `stream: true` is sent with tool definitions enabled (`tool_choice != "none"`), the server buffers the upstream response to parse `tool_call` blocks before emitting Anthropic SSE events rather than streaming raw tokens live.
+
 ### Gemini CLI
 
 ```bash
@@ -315,11 +331,20 @@ Create `config.json` in the same directory:
   "cookie_file": null,
   "proxy": null,
   "impersonate": null,
-  "log_requests": true
+  "log_requests": true,
+  "session_enabled": true,
+  "max_context_tokens": 1000000,
+  "session_rollover_ratio": 0.85,
+  "compress_threshold_ratio": 0.60,
+  "keep_recent_messages": 6,
+  "session_ttl_sec": 3600,
+  "max_sessions": 1024
 }
 ```
 
-When `api_keys` is empty `[]`, authentication is disabled. When keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>`.
+When `api_keys` is empty `[]`, authentication is disabled. When keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>` (or `x-api-key`).
+
+When `session_enabled` is `true` and cookies are loaded, the proxy continues Gemini Web threads (`cid`/`rid`/`rcid`), compresses older/large turns past `compress_threshold_ratio`, and rolls over to a fresh session with a compressed summary past `session_rollover_ratio` (or reactively on upstream context errors). Browser-exported cookie arrays (`cookie.json`, see `cookie.example.json`) are supported and auto-detected when present.
 
 ## Proxy
 
@@ -360,7 +385,7 @@ gemini-web2api.exe
 ## Limitations
 
 - **Tier-dependent routing**: The Gemini web app exposes models through tier slots rather than a direct model switch. Without an entitled cookie, Pro/Ultra model names resolve to the best model available on the same slot.
-- **Single-turn only**: Each request is an independent conversation. Multi-turn context is simulated by including previous messages in the prompt.
+- **Session continuity & token estimates**: With cookies and `session_enabled: true`, multi-turn context uses Gemini Web threads (`cid`/`rid`/`rcid`) with automatic context compression and rollover; anonymous setups remain single-turn. Token counts in `usage` and `/v1/messages/count_tokens` are character-based estimates (`len / 4`).
 - **Rate limits**: Google may throttle high-frequency requests. The server retries automatically but sustained heavy use may be blocked.
 
 ## License

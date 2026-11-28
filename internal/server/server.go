@@ -66,6 +66,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", a.handleHealth)
 	mux.HandleFunc("GET /v1/models", a.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", a.handleChat)
+	mux.HandleFunc("POST /v1/messages", a.handleMessages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", a.handleCountTokens)
 	mux.HandleFunc("POST /v1/responses", a.handleResponses)
 
 	mux.HandleFunc("GET /v1beta/models", a.handleGoogleModels)
