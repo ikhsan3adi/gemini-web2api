@@ -112,6 +112,7 @@ func TestCookieCacheReloadsOnSameMtimeRewrite(t *testing.T) {
 	}
 
 	cache := NewCookieCache(cookiePath)
+	cache.verifyEvery = 0
 	info1, err := cache.Load()
 	if err != nil {
 		t.Fatalf("first Load() error: %v", err)
@@ -135,5 +136,52 @@ func TestCookieCacheReloadsOnSameMtimeRewrite(t *testing.T) {
 	}
 	if info2.SAPISID != "sap_v2" {
 		t.Errorf("expected reload when content changed with same mtime/size; got SAPISID = %q", info2.SAPISID)
+	}
+}
+
+func TestCookieCacheSkipsStatMatchWithinVerifyWindow(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookiePath := filepath.Join(tmpDir, "cookie.json")
+	fixedTime := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
+	first := `[{"domain":".google.com","name":"SAPISID","value":"sap_v1"}]`
+	if err := os.WriteFile(cookiePath, []byte(first), 0600); err != nil {
+		t.Fatalf("write initial cookie file: %v", err)
+	}
+	if err := os.Chtimes(cookiePath, fixedTime, fixedTime); err != nil {
+		t.Fatalf("chtimes initial: %v", err)
+	}
+
+	cache := NewCookieCache(cookiePath)
+	if _, err := cache.Load(); err != nil {
+		t.Fatalf("first Load() error: %v", err)
+	}
+
+	second := `[{"domain":".google.com","name":"SAPISID","value":"sap_v2"}]`
+	if err := os.WriteFile(cookiePath, []byte(second), 0600); err != nil {
+		t.Fatalf("rewrite cookie file: %v", err)
+	}
+	if err := os.Chtimes(cookiePath, fixedTime, fixedTime); err != nil {
+		t.Fatalf("chtimes rewrite: %v", err)
+	}
+
+	cached, err := cache.Load()
+	if err != nil {
+		t.Fatalf("cached Load() error: %v", err)
+	}
+	if cached.SAPISID != "sap_v1" {
+		t.Errorf("expected cached value inside verify window; got SAPISID = %q", cached.SAPISID)
+	}
+
+	cache.mu.Lock()
+	cache.verifiedAt = time.Now().Add(-2 * cookieVerifyInterval)
+	cache.mu.Unlock()
+
+	reloaded, err := cache.Load()
+	if err != nil {
+		t.Fatalf("reloaded Load() error: %v", err)
+	}
+	if reloaded.SAPISID != "sap_v2" {
+		t.Errorf("expected reload after verify window; got SAPISID = %q", reloaded.SAPISID)
 	}
 }

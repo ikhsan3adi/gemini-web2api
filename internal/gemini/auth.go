@@ -21,17 +21,21 @@ type CookieInfo struct {
 	GeminiBL  string
 }
 
+const cookieVerifyInterval = time.Second
+
 type CookieCache struct {
-	mu    sync.Mutex
-	file  string
-	mtime time.Time
-	size  int64
-	hash  [32]byte
-	info  CookieInfo
+	mu          sync.Mutex
+	file        string
+	mtime       time.Time
+	size        int64
+	hash        [32]byte
+	info        CookieInfo
+	verifiedAt  time.Time
+	verifyEvery time.Duration
 }
 
 func NewCookieCache(file string) *CookieCache {
-	return &CookieCache{file: file}
+	return &CookieCache{file: file, verifyEvery: cookieVerifyInterval}
 }
 
 func (c *CookieCache) Load() (CookieInfo, error) {
@@ -51,6 +55,11 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 		return CookieInfo{}, err
 	}
 
+	if c.info.Cookie != "" && stat.ModTime().Equal(c.mtime) && stat.Size() == c.size &&
+		c.verifyEvery > 0 && time.Since(c.verifiedAt) < c.verifyEvery {
+		return c.info, nil
+	}
+
 	contentBytes, err := os.ReadFile(c.file)
 	if err != nil {
 		if c.info.Cookie != "" {
@@ -62,6 +71,7 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 
 	sum := sha256.Sum256(contentBytes)
 	if stat.ModTime().Equal(c.mtime) && stat.Size() == c.size && sum == c.hash && c.info.Cookie != "" {
+		c.verifiedAt = time.Now()
 		return c.info, nil
 	}
 
@@ -79,6 +89,7 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 	c.size = stat.Size()
 	c.hash = sum
 	c.info = info
+	c.verifiedAt = time.Now()
 
 	return c.info, nil
 }
